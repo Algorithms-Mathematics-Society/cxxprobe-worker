@@ -120,7 +120,13 @@ class FilesystemArtifactStorage:
         return sorted(str(p.relative_to(base)) for p in base.rglob("*") if p.is_file())
 
 
-def build_storage(backend: str, root: Path) -> IArtifactStorage:
+def build_storage(
+    backend: str,
+    root: Path,
+    bucket: str = "",
+    prefix: str = "artifacts",
+    region: str | None = None,
+) -> IArtifactStorage:
     """Construct the configured backend.
 
     Raises ValueError rather than falling back, so a typo'd backend name is
@@ -128,4 +134,10 @@ def build_storage(backend: str, root: Path) -> IArtifactStorage:
     """
     if backend == "filesystem":
         return FilesystemArtifactStorage(root)
+    if backend == "s3":
+        if not bucket:
+            raise ValueError("storage.bucket is required when storage.backend is 's3'")
+        from cxxprobe_worker.aws.storage import S3ArtifactStorage
+
+        return S3ArtifactStorage(bucket=bucket, prefix=prefix, region=region)
     raise ValueError(f"unknown storage backend: {backend!r}")

@@ -74,4 +74,11 @@ def test_build_storage_returns_filesystem_backend(tmp_path: Path):
 
 def test_build_storage_rejects_unknown_backend(tmp_path: Path):
     with pytest.raises(ValueError, match="unknown storage backend"):
-        build_storage("s3", tmp_path)
+        build_storage("gcs", tmp_path)
+
+
+def test_build_storage_requires_a_bucket_for_s3(tmp_path: Path):
+    # Failing at startup beats discovering the missing bucket on the first
+    # artifact write, halfway through a contest.
+    with pytest.raises(ValueError, match=r"storage\.bucket is required"):
+        build_storage("s3", tmp_path, bucket="")

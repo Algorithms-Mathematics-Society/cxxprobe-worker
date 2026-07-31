@@ -74,19 +74,48 @@ def _is_zip(path: Path) -> bool:
     return path.is_file() and zipfile.is_zipfile(path)
 
 
-def _stage_inputs(job: Job, workspace: Workspace) -> tuple[str, Path]:
-    """Copy the job's package and submission into its private workspace.
+def _materialise(uri: str, destination: Path, fetcher: Any) -> Path:
+    """Bring a possibly-remote job input onto local disk.
+
+    Local paths pass straight through; ``s3://`` URIs are downloaded. This is
+    the only place that distinction exists, so everything downstream can
+    assume the inputs are files.
+    """
+    from cxxprobe_worker.aws.fetch import FetchError, is_remote
+
+    if not is_remote(uri):
+        return Path(uri)
+    if fetcher is None:
+        raise PreparationError(f"job references {uri} but no S3 fetcher is configured")
+    try:
+        fetched: Path = fetcher.fetch(str(uri), destination)
+    except FetchError as exc:
+        raise PreparationError(str(exc)) from exc
+    return fetched
+
+
+def _stage_inputs(job: Job, workspace: Workspace, fetcher: Any = None) -> tuple[str, Path]:
+    """Bring the job's package and submission into its private workspace.
 
     Returns the ``cxxprobe judge`` flag to use for the package and its path.
-    Copying rather than referencing in place means a job can never mutate
-    the queue's own state, and a retry starts from identical inputs.
+    Copying (or downloading) rather than referencing in place means a job can
+    never mutate shared state, and a retry starts from identical inputs.
     """
-    if not job.submission_path.is_file():
-        raise PreparationError(f"submission not found: {job.submission_path}")
-    try:
-        shutil.copy2(job.submission_path, workspace.submission_path)
-    except OSError as exc:
-        raise PreparationError(f"cannot stage submission: {exc}") from exc
+    submission_src = _materialise(str(job.submission_path), workspace.submission_path, fetcher)
+    if submission_src != workspace.submission_path:
+        if not submission_src.is_file():
+            raise PreparationError(f"submission not found: {submission_src}")
+        try:
+            shutil.copy2(submission_src, workspace.submission_path)
+        except OSError as exc:
+            raise PreparationError(f"cannot stage submission: {exc}") from exc
+
+    from cxxprobe_worker.aws.fetch import is_remote as _remote
+
+    if _remote(str(job.package_path)):
+        # A remote package is always a .cxxpkg zip; cxxprobe unpacks it.
+        staged = _materialise(str(job.package_path), workspace.root / "package.zip", fetcher)
+        return "--package", staged
 
     if _is_zip(job.package_path):
         staged = workspace.root / "package.zip"
@@ -116,11 +145,14 @@ class JobExecutor:
         workspaces: WorkspaceManager,
         storage: IArtifactStorage,
         logger: Logger,
+        fetcher: Any = None,
     ) -> None:
         self._judge = judge
         self._workspaces = workspaces
         self._storage = storage
         self._log = logger
+        # Only set when the deployment can receive s3:// job inputs.
+        self._fetcher = fetcher
 
     def execute(self, job: Job) -> JobResult:
         """Run one job to completion. Never raises for a job-level failure."""
@@ -158,7 +190,7 @@ class JobExecutor:
         return result
 
     def _run_in_workspace(self, job: Job, workspace: Workspace, started: float) -> JobResult:
-        package_flag, package_path = _stage_inputs(job, workspace)
+        package_flag, package_path = _stage_inputs(job, workspace, self._fetcher)
 
         argv = [
             self._judge.binary,

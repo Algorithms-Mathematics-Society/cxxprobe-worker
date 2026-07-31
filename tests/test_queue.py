@@ -142,7 +142,12 @@ def test_build_queue_returns_local_backend(tmp_path: Path):
 
 def test_build_queue_rejects_unknown_backend(tmp_path: Path):
     with pytest.raises(ValueError, match="unknown queue backend"):
-        build_queue("sqs", tmp_path, 60.0)
+        build_queue("kafka", tmp_path, 60.0)
+
+
+def test_build_queue_requires_a_url_for_sqs(tmp_path: Path):
+    with pytest.raises(ValueError, match=r"queue\.queue_url is required"):
+        build_queue("sqs", tmp_path, 60.0, queue_url="")
 
 
 def test_delivery_attempts_increment_across_redeliveries(tmp_path: Path):

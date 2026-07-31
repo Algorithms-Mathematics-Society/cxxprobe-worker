@@ -44,13 +44,30 @@ def build_application(config: WorkerConfig) -> Application:
         config.queue.root,
         config.queue.visibility_timeout_seconds,
         config.queue.max_delivery_attempts,
+        queue_url=config.queue.queue_url,
+        region=config.aws.region,
+        wait_time_seconds=config.queue.wait_time_seconds,
     )
-    storage = build_storage(config.storage.backend, config.storage.root)
+    storage = build_storage(
+        config.storage.backend,
+        config.storage.root,
+        bucket=config.storage.bucket,
+        prefix=config.storage.prefix,
+        region=config.aws.region,
+    )
     workspaces = WorkspaceManager(
         config.workspace.root,
         keep_on_failure=config.workspace.keep_on_failure,
     )
-    executor = JobExecutor(config.judge, workspaces, storage, logger)
+    # An S3 fetcher only exists when something in the deployment can hand
+    # out s3:// URIs; a purely local worker never needs boto3 at all.
+    fetcher = None
+    if config.storage.backend == "s3" or config.queue.backend == "sqs":
+        from cxxprobe_worker.aws.fetch import S3Fetcher
+
+        fetcher = S3Fetcher(region=config.aws.region)
+
+    executor = JobExecutor(config.judge, workspaces, storage, logger, fetcher=fetcher)
     worker = Worker(config, queue, executor, logger, metrics, health)
 
     return Application(

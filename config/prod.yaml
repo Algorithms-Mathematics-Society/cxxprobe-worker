@@ -31,3 +31,24 @@ monitoring:
   log_level: info
   log_format: json
   health_file: /var/run/cxxprobe-worker/health.json
+
+# ── cloud backends ────────────────────────────────────────────────────────
+# Uncomment to run against AWS. Requires `uv sync --extra aws` and either an
+# instance role (preferred) or ambient credentials.
+#
+# aws:
+#   region: ap-south-1
+#
+# storage:
+#   backend: s3
+#   bucket: ams-prod-objects
+#   prefix: artifacts
+#
+# queue:
+#   backend: sqs
+#   queue_url: https://sqs.ap-south-1.amazonaws.com/362249012864/submission-evaluation
+#   wait_time_seconds: 20
+#
+# control_plane:
+#   base_url: https://api.amsaccess.example
+#   pool: default

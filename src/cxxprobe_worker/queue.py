@@ -228,7 +228,16 @@ def build_queue(
     root: Path,
     visibility_timeout_seconds: float,
     max_delivery_attempts: int = 5,
+    queue_url: str = "",
+    region: str | None = None,
+    wait_time_seconds: int = 20,
 ) -> IJobQueue:
     if backend == "local":
         return LocalJobQueue(root, visibility_timeout_seconds, max_delivery_attempts)
+    if backend == "sqs":
+        if not queue_url:
+            raise ValueError("queue.queue_url is required when queue.backend is 'sqs'")
+        from cxxprobe_worker.aws.queue import SqsJobQueue
+
+        return SqsJobQueue(queue_url, region=region, wait_time_seconds=wait_time_seconds)
     raise ValueError(f"unknown queue backend: {backend!r}")

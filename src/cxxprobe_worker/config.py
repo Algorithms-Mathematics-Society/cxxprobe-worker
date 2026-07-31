@@ -66,15 +66,16 @@ class StorageConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    backend: Literal["filesystem"] = "filesystem"
-    """Only ``filesystem`` exists today.
-
-    The IArtifactStorage protocol is what an S3 backend would implement; no
-    such backend is written yet, and this field exists so adding one doesn't
-    have to change the config shape.
-    """
+    backend: Literal["filesystem", "s3"] = "filesystem"
 
     root: Path = Path("/var/lib/cxxprobe-worker/artifacts")
+    """Filesystem backend only."""
+
+    bucket: str = ""
+    """S3 backend only. Required when backend is ``s3``."""
+
+    prefix: str = "artifacts"
+    """S3 key prefix, so artifacts share a bucket with packages and sources."""
 
 
 class QueueConfig(BaseModel):
@@ -82,13 +83,17 @@ class QueueConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    backend: Literal["local"] = "local"
-    """Only ``local`` (a filesystem spool directory) exists today.
-
-    SQS would implement the same IJobQueue protocol.
-    """
+    backend: Literal["local", "sqs"] = "local"
 
     root: Path = Path("/var/lib/cxxprobe-worker/queue")
+    """Local backend only."""
+
+    queue_url: str = ""
+    """SQS backend only. Required when backend is ``sqs``."""
+
+    wait_time_seconds: int = Field(default=20, ge=0, le=20)
+    """SQS long-poll duration. 20s is the maximum and the difference between
+    one API call per job and one per poll interval."""
     poll_interval_seconds: float = Field(default=2.0, gt=0)
     visibility_timeout_seconds: float = Field(default=600.0, gt=0)
     """How long a claimed job may run before another worker may reclaim it."""
@@ -100,6 +105,31 @@ class QueueConfig(BaseModel):
     "this package is broken" on the first attempt, so a cap is what stops a
     permanently-bad job from recirculating for ever.
     """
+
+
+class AwsConfig(BaseModel):
+    """Shared AWS settings for whichever backends are enabled."""
+
+    model_config = {"extra": "forbid"}
+
+    region: str = "ap-south-1"
+
+
+class ControlPlaneConfig(BaseModel):
+    """ams-api, where the worker registers and posts results.
+
+    Empty ``base_url`` means standalone mode: judge and store artifacts, but
+    report to nobody. That is what keeps the local/filesystem path usable
+    without any AMS deployment at all.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    base_url: str = ""
+    api_key: str = ""
+    pool: str = "default"
+    heartbeat_seconds: float = Field(default=10.0, gt=0)
+    timeout_seconds: float = Field(default=30.0, gt=0)
 
 
 class MonitoringConfig(BaseModel):
@@ -135,6 +165,8 @@ class WorkerConfig(BaseModel):
     trusting a long-lived process not to leak.
     """
 
+    aws: AwsConfig = Field(default_factory=AwsConfig)
+    control_plane: ControlPlaneConfig = Field(default_factory=ControlPlaneConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
