@@ -1,0 +1,33 @@
+# Production. concurrency is the one knob most worth tuning per host —
+# each concurrent job compiles and runs a submission, so it's roughly
+# "how many cores am I willing to give to judging".
+worker_id: worker-prod
+concurrency: 4
+# Recycle after 1000 jobs rather than trusting a process to run for weeks.
+max_jobs: 1000
+
+judge:
+  binary: /usr/local/bin/cxxprobe
+  timeout_seconds: 300
+  extra_args: []
+
+workspace:
+  root: /var/lib/cxxprobe-worker/workspaces
+  # Off in prod: a wedged worker filling its disk with failed workspaces is
+  # a worse failure than losing a repro.
+  keep_on_failure: false
+
+storage:
+  backend: filesystem
+  root: /var/lib/cxxprobe-worker/artifacts
+
+queue:
+  backend: local
+  root: /var/lib/cxxprobe-worker/queue
+  poll_interval_seconds: 2.0
+  visibility_timeout_seconds: 900
+
+monitoring:
+  log_level: info
+  log_format: json
+  health_file: /var/run/cxxprobe-worker/health.json

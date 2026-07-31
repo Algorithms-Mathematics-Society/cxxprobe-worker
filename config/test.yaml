@@ -1,0 +1,30 @@
+# Local development and the automated test suite. Everything lives under
+# /tmp so a test run never touches state a real deployment would own.
+worker_id: worker-test
+concurrency: 1
+max_jobs: null
+
+judge:
+  binary: cxxprobe
+  timeout_seconds: 60
+  extra_args: []
+
+workspace:
+  root: /tmp/cxxprobe-worker/test/workspaces
+  # Keeping failed workspaces is only safe where disk is disposable.
+  keep_on_failure: true
+
+storage:
+  backend: filesystem
+  root: /tmp/cxxprobe-worker/test/artifacts
+
+queue:
+  backend: local
+  root: /tmp/cxxprobe-worker/test/queue
+  poll_interval_seconds: 0.2
+  visibility_timeout_seconds: 60
+
+monitoring:
+  log_level: debug
+  log_format: text
+  health_file: /tmp/cxxprobe-worker/test/health.json

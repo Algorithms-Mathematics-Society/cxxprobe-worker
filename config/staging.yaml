@@ -1,0 +1,29 @@
+# Mirrors prod's shape with lower concurrency and chattier logs, so a
+# staging incident is diagnosable without attaching a debugger.
+worker_id: worker-staging
+concurrency: 2
+max_jobs: null
+
+judge:
+  binary: /usr/local/bin/cxxprobe
+  timeout_seconds: 300
+  extra_args: []
+
+workspace:
+  root: /var/lib/cxxprobe-worker/workspaces
+  keep_on_failure: true
+
+storage:
+  backend: filesystem
+  root: /var/lib/cxxprobe-worker/artifacts
+
+queue:
+  backend: local
+  root: /var/lib/cxxprobe-worker/queue
+  poll_interval_seconds: 2.0
+  visibility_timeout_seconds: 600
+
+monitoring:
+  log_level: debug
+  log_format: json
+  health_file: /var/run/cxxprobe-worker/health.json
