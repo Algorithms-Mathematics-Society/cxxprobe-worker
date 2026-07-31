@@ -70,6 +70,32 @@ def _diagnostics_from(report: dict[str, Any]) -> str:
     return ""
 
 
+def _submission_failed_to_compile(report: dict[str, Any]) -> bool:
+    """True when it was the *submission* that would not build.
+
+    This is the difference between "this machine is broken" and "this code
+    is broken". cxxprobe exits 2 for both and both report a failed solution
+    compile, so shape alone cannot separate them — but the compile step's
+    **exit code** can:
+
+        exit_code >= 0   the compiler ran and rejected the source
+        exit_code <  0   the sandbox never managed to launch it
+
+    Only the first is the submitter's fault. Getting this backwards matters:
+    a syntax error fails identically on every worker, and during a contest
+    those are a large share of all submissions, so retrying them would
+    starve the queue of real work.
+    """
+    compile_section = report.get("compile")
+    if not isinstance(compile_section, dict):
+        return False
+    solution = compile_section.get("solution")
+    if not isinstance(solution, dict) or solution.get("ok") is not False:
+        return False
+    exit_code = solution.get("exit_code")
+    return isinstance(exit_code, int) and exit_code >= 0
+
+
 def _is_zip(path: Path) -> bool:
     return path.is_file() and zipfile.is_zipfile(path)
 
@@ -251,13 +277,23 @@ class JobExecutor:
             detail = completed.stderr.strip() or completed.stdout.strip() or "(no output)"
             if report is not None:
                 detail = _diagnostics_from(report) or detail
+
+            # A submission that will not compile is the submitter's problem,
+            # not the machine's. It fails identically on every worker, so
+            # retrying it just burns the queue — and in a contest a large
+            # share of submissions are exactly this.
+            submitter_at_fault = report is not None and _submission_failed_to_compile(report)
             result = JobResult(
                 job_id=job.job_id,
-                status=JobStatus.RETRYABLE,
+                status=JobStatus.FAILED if submitter_at_fault else JobStatus.RETRYABLE,
                 exit_code=completed.returncode,
                 duration_seconds=duration,
                 report=report,
-                error=f"cxxprobe judge could not judge (exit {completed.returncode}): {detail}",
+                error=(
+                    f"submission failed to compile: {detail}"
+                    if submitter_at_fault
+                    else f"cxxprobe judge could not judge (exit {completed.returncode}): {detail}"
+                ),
             )
         elif report is None:
             # Exit 0/1 means judging happened, so a missing report is

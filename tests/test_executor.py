@@ -279,3 +279,60 @@ def test_unparseable_report_is_treated_as_no_report(tmp_path, workspaces, storag
         Job(job_id="j1", package_path=str(package), submission_path=str(submission))
     )
     assert result.status is JobStatus.FAILED
+
+
+def test_a_submission_that_will_not_compile_is_permanent_not_retryable(
+    tmp_path, fake_cxxprobe, workspaces, storage, logger
+):
+    """A syntax error fails identically on every worker.
+
+    cxxprobe exits 2 both for a broken machine and for a broken submission.
+    Treating the second as retryable means a contest's compile errors — a
+    large share of all submissions — recirculate until they dead-letter,
+    starving real work.
+    """
+    package, submission = make_inputs(tmp_path)
+    ce_report = json.dumps(
+        {
+            "slug": "a-warmup",
+            "overall": "ERROR",
+            "compile": {"solution": {"ok": False, "exit_code": 1, "diagnostics": "expected ';'"}},
+        }
+    )
+    binary = fake_cxxprobe(exit_code=2, report=ce_report)
+    executor = build_executor(binary, workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
+    assert result.status is JobStatus.FAILED
+    assert result.should_retry is False
+    assert result.error is not None
+    assert "failed to compile" in result.error
+
+
+def test_a_broken_sandbox_is_still_retryable(tmp_path, fake_cxxprobe, workspaces, storage, logger):
+    """Same exit code and report shape as a CE — but exit_code -1 gives it away."""
+    package, submission = make_inputs(tmp_path)
+    sandbox_report = json.dumps(
+        {
+            "slug": "a-warmup",
+            "overall": "ERROR",
+            "compile": {
+                "solution": {
+                    "ok": False,
+                    "exit_code": -1,
+                    "diagnostics": "create cgroup root /sys/fs/cgroup/cxxprobe: Permission denied",
+                }
+            },
+        }
+    )
+    binary = fake_cxxprobe(exit_code=2, report=sandbox_report)
+    executor = build_executor(binary, workspaces, storage, logger)
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
+    # Same shape as a compile error, but exit_code -1 means the compiler
+    # never ran — that is the machine's fault, so it must be retried.
+    assert result.status is JobStatus.RETRYABLE
+    assert result.should_retry is True
