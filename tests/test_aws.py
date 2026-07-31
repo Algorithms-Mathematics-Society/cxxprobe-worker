@@ -52,8 +52,8 @@ def sqs_queue():
 def make_job(job_id: str = "job-1") -> Job:
     return Job(
         job_id=job_id,
-        package_path=Path("s3://bucket/problems/p/v/package.cxxpkg"),
-        submission_path=Path("s3://bucket/submissions/s/source.cpp"),
+        package_path="s3://bucket/problems/p/v/package.cxxpkg",
+        submission_path="s3://bucket/submissions/s/source.cpp",
     )
 
 
@@ -209,8 +209,8 @@ def test_metadata_survives_a_round_trip(sqs_queue):
     queue, _ = sqs_queue
     job = Job(
         job_id="job-1",
-        package_path=Path("s3://b/p.cxxpkg"),
-        submission_path=Path("s3://b/s.cpp"),
+        package_path="s3://b/p.cxxpkg",
+        submission_path="s3://b/s.cpp",
         problem_slug="a-warmup",
         metadata={"submission_uid": "abc", "contest_uid": "def"},
     )
@@ -218,9 +218,7 @@ def test_metadata_survives_a_round_trip(sqs_queue):
     lease = queue.claim()
     assert lease is not None
     assert lease.job.metadata == {"submission_uid": "abc", "contest_uid": "def"}
-    assert str(lease.job.package_path) == "s3:/b/p.cxxpkg" or "b/p.cxxpkg" in str(
-        lease.job.package_path
-    )
+    assert lease.job.package_path == "s3://b/p.cxxpkg"
 
 
 def test_poison_message_is_deleted_not_redelivered(sqs_queue):
@@ -245,3 +243,49 @@ def test_depth_reports_queued_messages(sqs_queue):
     queue.publish(make_job("job-1"))
     queue.publish(make_job("job-2"))
     assert queue.depth() == 2
+
+
+# ── regression: an s3:// URI must survive the Job model ───────────────────
+
+
+def test_s3_uri_survives_the_job_model():
+    """`Path("s3://b/k")` collapses the double slash to `s3:/b/k`.
+
+    This shipped once: package_path/submission_path were typed `Path`, so by
+    the time the executor asked `is_remote()` the URI had already been
+    corrupted into something that no longer parsed, and every cloud job
+    failed with "submission not found: s3:/...".
+    """
+    job = Job(
+        job_id="j1",
+        package_path="s3://ams-prod-objects/problems/p/v/package.cxxpkg",
+        submission_path="s3://ams-prod-objects/submissions/s/source.cpp",
+    )
+    assert job.package_path == "s3://ams-prod-objects/problems/p/v/package.cxxpkg"
+    assert is_remote(job.package_path)
+    assert parse_s3_uri(job.submission_path) == (
+        "ams-prod-objects",
+        "submissions/s/source.cpp",
+    )
+
+
+def test_a_path_argument_is_still_accepted_and_normalised():
+    """Local callers hold a Path; they shouldn't have to stringify."""
+    # Passing Path is the whole point here, so the type errors are expected.
+    job = Job(
+        job_id="j1",
+        package_path=Path("/tmp/pkg"),  # type: ignore[arg-type]
+        submission_path=Path("/tmp/s.cpp"),  # type: ignore[arg-type]
+    )
+    assert job.package_path == "/tmp/pkg"
+    assert isinstance(job.package_path, str)
+    assert not is_remote(job.package_path)
+
+
+def test_uri_survives_a_queue_round_trip(sqs_queue):
+    queue, _ = sqs_queue
+    uri = "s3://ams-prod-objects/problems/p/v/package.cxxpkg"
+    queue.publish(Job(job_id="j1", package_path=uri, submission_path=uri))
+    lease = queue.claim()
+    assert lease is not None
+    assert lease.job.package_path == uri

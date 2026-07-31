@@ -101,7 +101,9 @@ def _stage_inputs(job: Job, workspace: Workspace, fetcher: Any = None) -> tuple[
     Copying (or downloading) rather than referencing in place means a job can
     never mutate shared state, and a retry starts from identical inputs.
     """
-    submission_src = _materialise(str(job.submission_path), workspace.submission_path, fetcher)
+    from cxxprobe_worker.aws.fetch import is_remote
+
+    submission_src = _materialise(job.submission_path, workspace.submission_path, fetcher)
     if submission_src != workspace.submission_path:
         if not submission_src.is_file():
             raise PreparationError(f"submission not found: {submission_src}")
@@ -110,30 +112,29 @@ def _stage_inputs(job: Job, workspace: Workspace, fetcher: Any = None) -> tuple[
         except OSError as exc:
             raise PreparationError(f"cannot stage submission: {exc}") from exc
 
-    from cxxprobe_worker.aws.fetch import is_remote as _remote
-
-    if _remote(str(job.package_path)):
+    if is_remote(job.package_path):
         # A remote package is always a .cxxpkg zip; cxxprobe unpacks it.
-        staged = _materialise(str(job.package_path), workspace.root / "package.zip", fetcher)
+        staged = _materialise(job.package_path, workspace.root / "package.zip", fetcher)
         return "--package", staged
 
-    if _is_zip(job.package_path):
+    package = Path(job.package_path)
+    if _is_zip(package):
         staged = workspace.root / "package.zip"
         try:
-            shutil.copy2(job.package_path, staged)
+            shutil.copy2(package, staged)
         except OSError as exc:
             raise PreparationError(f"cannot stage package zip: {exc}") from exc
         return "--package", staged
 
-    if job.package_path.is_dir():
+    if package.is_dir():
         staged = workspace.package_dir
         try:
-            shutil.copytree(job.package_path, staged, dirs_exist_ok=True)
+            shutil.copytree(package, staged, dirs_exist_ok=True)
         except OSError as exc:
             raise PreparationError(f"cannot stage package directory: {exc}") from exc
         return "--problem-dir", staged
 
-    raise PreparationError(f"package is neither a zip nor a directory: {job.package_path}")
+    raise PreparationError(f"package is neither a zip nor a directory: {package}")
 
 
 class JobExecutor:

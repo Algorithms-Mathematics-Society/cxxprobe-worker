@@ -9,10 +9,9 @@ a JSON report.
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 class JobError(RuntimeError):
@@ -44,11 +43,15 @@ class Job(BaseModel):
     model_config = {"extra": "forbid"}
 
     job_id: str = Field(min_length=1)
-    package_path: Path
-    """A cxxprobe pack zip, or an already-unpacked problem directory."""
 
-    submission_path: Path
-    """The source file to grade."""
+    # Deliberately `str`, not `Path`: these may be `s3://bucket/key` URIs,
+    # and pathlib collapses `//` to `/`, which silently corrupts a URI into
+    # something that no longer parses as one.
+    package_path: str
+    """A cxxprobe pack zip, an unpacked problem directory, or an s3:// URI."""
+
+    submission_path: str
+    """The source file to grade — local path or s3:// URI."""
 
     problem_slug: str | None = None
     """Advisory only — cxxprobe resolves the problem from the package itself.
@@ -59,6 +62,17 @@ class Job(BaseModel):
 
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Opaque passthrough (submission id, contest id, …). Never interpreted."""
+
+    @field_validator("package_path", "submission_path", mode="before")
+    @classmethod
+    def _coerce_location(cls, v: Any) -> str:
+        """Accept a Path or a string, always store a string.
+
+        Callers holding a local `Path` shouldn't have to stringify, but the
+        stored value must stay a string: `Path("s3://b/k")` collapses the
+        double slash to `s3:/b/k`, which no longer parses as a URI.
+        """
+        return str(v)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Job:

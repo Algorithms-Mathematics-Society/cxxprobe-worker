@@ -44,8 +44,8 @@ def publish(queue: LocalJobQueue, tmp_path: Path, count: int) -> None:
         queue.publish(
             Job(
                 job_id=f"job-{i}",
-                package_path=tmp_path / "pkg",
-                submission_path=tmp_path / "sub.cpp",
+                package_path=str(tmp_path / "pkg"),
+                submission_path=str(tmp_path / "sub.cpp"),
             )
         )
 

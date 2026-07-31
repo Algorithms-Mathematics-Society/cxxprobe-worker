@@ -40,7 +40,9 @@ def test_exit_zero_with_report_is_succeeded(tmp_path, fake_cxxprobe, workspaces,
     binary = fake_cxxprobe(exit_code=0, report=SAMPLE_REPORT)
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.SUCCEEDED
     assert result.report == {"slug": "a-warmup", "overall": "PASS"}
 
@@ -54,7 +56,9 @@ def test_exit_one_with_report_is_still_succeeded(
     binary = fake_cxxprobe(exit_code=1, report=FAILING_REPORT)
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.SUCCEEDED
     assert result.should_retry is False
     assert result.report is not None
@@ -66,7 +70,9 @@ def test_exit_two_without_report_is_retryable(tmp_path, fake_cxxprobe, workspace
     binary = fake_cxxprobe(exit_code=2, report=None, stderr="cxxprobe: bad problem dir")
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.RETRYABLE
     assert result.error is not None
     assert "bad problem dir" in result.error
@@ -81,7 +87,9 @@ def test_judged_exit_code_without_report_is_a_permanent_failure(
     binary = fake_cxxprobe(exit_code=1, report=None)
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.FAILED
 
 
@@ -107,7 +115,9 @@ def test_exit_two_with_a_report_is_retryable_not_a_verdict(
     binary = fake_cxxprobe(exit_code=2, report=unjudgeable)
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.RETRYABLE
     assert result.should_retry is True
     assert result.error is not None
@@ -122,7 +132,9 @@ def test_missing_binary_is_retryable(tmp_path, workspaces, storage, logger):
     package, submission = make_inputs(tmp_path)
     executor = build_executor(tmp_path / "does-not-exist", workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.RETRYABLE
     assert result.error is not None
     assert "not found" in result.error
@@ -133,7 +145,9 @@ def test_timeout_is_retryable(tmp_path, fake_cxxprobe, workspaces, storage, logg
     binary = fake_cxxprobe(exit_code=0, report=SAMPLE_REPORT, sleep=5)
     executor = build_executor(binary, workspaces, storage, logger, timeout=0.2)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.RETRYABLE
     assert result.error is not None
     assert "exceeded" in result.error
@@ -147,7 +161,7 @@ def test_missing_submission_is_a_permanent_failure(
     executor = build_executor(binary, workspaces, storage, logger)
 
     result = executor.execute(
-        Job(job_id="j1", package_path=package, submission_path=tmp_path / "absent.cpp")
+        Job(job_id="j1", package_path=str(package), submission_path=str(tmp_path / "absent.cpp"))
     )
     assert result.status is JobStatus.FAILED
     assert result.error is not None
@@ -163,7 +177,9 @@ def test_package_that_is_neither_zip_nor_directory_fails_permanently(
     binary = fake_cxxprobe(exit_code=0, report=SAMPLE_REPORT)
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=bogus, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(bogus), submission_path=str(submission))
+    )
     assert result.status is JobStatus.FAILED
 
 
@@ -187,7 +203,9 @@ def test_zip_package_is_passed_with_the_package_flag(tmp_path, workspaces, stora
     recorder.chmod(0o755)
     executor = build_executor(recorder, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=zip_path, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(zip_path), submission_path=str(submission))
+    )
     assert result.status is JobStatus.SUCCEEDED
     assert result.report is not None
     assert "--package" in result.report["argv"]
@@ -208,7 +226,9 @@ def test_directory_package_is_passed_with_the_problem_dir_flag(
     recorder.chmod(0o755)
     executor = build_executor(recorder, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.report is not None
     assert "--problem-dir" in result.report["argv"]
 
@@ -220,7 +240,9 @@ def test_artifacts_are_persisted_for_a_successful_job(
     binary = fake_cxxprobe(exit_code=0, report=SAMPLE_REPORT, stderr="some warning")
     executor = build_executor(binary, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert "report.json" in result.artifacts
     assert "submission.cpp" in result.artifacts
     assert "stderr.log" in result.artifacts
@@ -232,7 +254,7 @@ def test_artifacts_outlive_the_workspace(tmp_path, fake_cxxprobe, workspaces, st
     binary = fake_cxxprobe(exit_code=0, report=SAMPLE_REPORT)
     executor = build_executor(binary, workspaces, storage, logger)
 
-    executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    executor.execute(Job(job_id="j1", package_path=str(package), submission_path=str(submission)))
     # The workspace is gone, but the report is still readable — that's the
     # entire point of the split between the two.
     assert list(workspaces.root.iterdir()) == []
@@ -253,5 +275,7 @@ def test_unparseable_report_is_treated_as_no_report(tmp_path, workspaces, storag
     garbage.chmod(0o755)
     executor = build_executor(garbage, workspaces, storage, logger)
 
-    result = executor.execute(Job(job_id="j1", package_path=package, submission_path=submission))
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
     assert result.status is JobStatus.FAILED

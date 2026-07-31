@@ -11,7 +11,9 @@ from cxxprobe_worker.queue import IJobQueue, LocalJobQueue, build_queue
 
 def make_job(job_id: str = "job-1", tmp_path: Path | None = None) -> Job:
     base = tmp_path or Path("/tmp")
-    return Job(job_id=job_id, package_path=base / "pkg.zip", submission_path=base / "sub.cpp")
+    return Job(
+        job_id=job_id, package_path=str(base / "pkg.zip"), submission_path=str(base / "sub.cpp")
+    )
 
 
 def test_publish_then_claim_returns_the_job(job_queue: LocalJobQueue, tmp_path: Path):
@@ -113,8 +115,8 @@ def test_job_missing_required_fields_is_quarantined(job_queue: LocalJobQueue):
 def test_metadata_survives_a_round_trip(job_queue: LocalJobQueue, tmp_path: Path):
     job = Job(
         job_id="job-1",
-        package_path=tmp_path / "p.zip",
-        submission_path=tmp_path / "s.cpp",
+        package_path=str(tmp_path / "p.zip"),
+        submission_path=str(tmp_path / "s.cpp"),
         problem_slug="a-warmup",
         metadata={"submission_id": "abc123", "attempt": 2},
     )

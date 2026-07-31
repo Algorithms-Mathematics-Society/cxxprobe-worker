@@ -100,8 +100,8 @@ def submit(
 
     job = Job(
         job_id=job_id or f"job-{uuid.uuid4().hex[:12]}",
-        package_path=package.resolve(),
-        submission_path=submission.resolve(),
+        package_path=str(package.resolve()),
+        submission_path=str(submission.resolve()),
         problem_slug=problem,
     )
     application.queue.publish(job)

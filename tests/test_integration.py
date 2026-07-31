@@ -91,7 +91,7 @@ def test_correct_solution_is_judged_and_stored(real_problem: Path, tmp_path: Pat
     executor = build_executor(tmp_path, logger)
 
     result = executor.execute(
-        Job(job_id="it-1", package_path=real_problem, submission_path=submission)
+        Job(job_id="it-1", package_path=str(real_problem), submission_path=str(submission))
     )
     _skip_without_sandbox(result)
 
@@ -108,7 +108,7 @@ def test_wrong_solution_is_still_a_successful_job(real_problem: Path, tmp_path: 
     executor = build_executor(tmp_path, logger)
 
     result = executor.execute(
-        Job(job_id="it-2", package_path=real_problem, submission_path=submission)
+        Job(job_id="it-2", package_path=str(real_problem), submission_path=str(submission))
     )
     _skip_without_sandbox(result)
 
@@ -130,7 +130,7 @@ def test_packaged_zip_is_judged(real_problem: Path, tmp_path: Path, logger):
     executor = build_executor(tmp_path, logger)
 
     result = executor.execute(
-        Job(job_id="it-3", package_path=contest / "p.zip", submission_path=submission)
+        Job(job_id="it-3", package_path=str(contest / "p.zip"), submission_path=str(submission))
     )
     _skip_without_sandbox(result)
 
