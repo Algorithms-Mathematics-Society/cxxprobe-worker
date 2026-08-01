@@ -18,7 +18,9 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import FrameType
 
+from cxxprobe_worker import __version__
 from cxxprobe_worker.config import WorkerConfig
+from cxxprobe_worker.control_plane import ControlPlaneClient
 from cxxprobe_worker.executor import JobExecutor
 from cxxprobe_worker.jobs import JobResult
 from cxxprobe_worker.monitoring import HealthReporter, Logger, Metrics
@@ -36,6 +38,7 @@ class Worker:
         logger: Logger,
         metrics: Metrics,
         health: HealthReporter,
+        control_plane: ControlPlaneClient | None = None,
     ) -> None:
         self._config = config
         self._queue = queue
@@ -43,6 +46,7 @@ class Worker:
         self._log = logger
         self._metrics = metrics
         self._health = health
+        self._control_plane = control_plane
         self._stopping = threading.Event()
         self._jobs_claimed = 0
 
@@ -101,6 +105,9 @@ class Worker:
 
     def run(self) -> int:
         """Poll until stopped or ``max_jobs`` is reached. Returns jobs processed."""
+        if self._control_plane is not None and self._control_plane.enabled:
+            self._control_plane.register(hostname=self._config.worker_id, version=__version__)
+
         self._log.info(
             "worker.start",
             worker_id=self._config.worker_id,
@@ -150,6 +157,8 @@ class Worker:
 
     def run_once(self) -> JobResult | None:
         """Claim and run at most one job, then return. Used by ``--once``."""
+        if self._control_plane is not None and self._control_plane.enabled:
+            self._control_plane.register(hostname=self._config.worker_id, version=__version__)
         try:
             lease = self._queue.claim()
         except QueueError as exc:

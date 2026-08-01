@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from cxxprobe_worker.config import WorkerConfig
+from cxxprobe_worker.control_plane import ControlPlaneClient
 from cxxprobe_worker.daemon import Worker
 from cxxprobe_worker.executor import JobExecutor
 from cxxprobe_worker.monitoring import HealthReporter, Logger, Metrics, build_logger
@@ -28,6 +29,7 @@ class Application:
     storage: IArtifactStorage
     workspaces: WorkspaceManager
     executor: JobExecutor
+    control_plane: ControlPlaneClient
     worker: Worker
 
 
@@ -68,7 +70,9 @@ def build_application(config: WorkerConfig) -> Application:
         fetcher = S3Fetcher(region=config.aws.region)
 
     executor = JobExecutor(config.judge, workspaces, storage, logger, fetcher=fetcher)
-    worker = Worker(config, queue, executor, logger, metrics, health)
+
+    control_plane = ControlPlaneClient(config.control_plane, logger)
+    worker = Worker(config, queue, executor, logger, metrics, health, control_plane=control_plane)
 
     return Application(
         config=config,
@@ -79,5 +83,6 @@ def build_application(config: WorkerConfig) -> Application:
         storage=storage,
         workspaces=workspaces,
         executor=executor,
+        control_plane=control_plane,
         worker=worker,
     )
