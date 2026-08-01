@@ -177,28 +177,43 @@ def test_complete_removes_the_message(sqs_queue):
     assert queue.claim() is None
 
 
-def test_release_makes_the_job_immediately_claimable(sqs_queue):
+def test_release_holds_the_job_back_instead_of_respinning_it(sqs_queue):
+    """A released job must not come straight back.
+
+    Zero visibility turns a fast-failing job — an unreadable package, say —
+    into a hot loop: claim, fail in 0.1s, release, repeat several times a
+    second until the DLQ catches it, starving real submissions meanwhile.
+    """
     queue, _ = sqs_queue
     queue.publish(make_job("job-1"))
     lease = queue.claim()
     assert lease is not None
     queue.release(lease)
 
-    again = queue.claim()
-    assert again is not None
-    assert again.job.job_id == "job-1"
+    assert queue.claim() is None, "the job should be invisible during backoff"
+
+
+def test_backoff_doubles_per_attempt_and_is_capped(sqs_queue):
+    queue, _ = sqs_queue
+    assert [queue._backoff_seconds(n) for n in (1, 2, 3, 4)] == [2, 4, 8, 16]
+    # Never longer than a running job's visibility timeout, or a released job
+    # would sit invisible longer than one actually being judged.
+    assert queue._backoff_seconds(50) == 300
 
 
 def test_delivery_attempt_comes_from_sqs_not_the_worker(sqs_queue):
     # The local queue tracks attempts in the filename; SQS reports
     # ApproximateReceiveCount, so the worker must read rather than count.
-    queue, _ = sqs_queue
+    queue, client = sqs_queue
     queue.publish(make_job("job-1"))
 
     first = queue.claim()
     assert first is not None
     assert first.delivery_attempt == 1
-    queue.release(first)
+    # Release with no backoff so the assertion is about counting, not timing.
+    client.change_message_visibility(
+        QueueUrl=queue.queue_url, ReceiptHandle=first.receipt, VisibilityTimeout=0
+    )
 
     second = queue.claim()
     assert second is not None

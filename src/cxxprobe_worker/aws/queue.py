@@ -28,6 +28,12 @@ if TYPE_CHECKING:  # pragma: no cover
     from mypy_boto3_sqs.client import SQSClient
 
 
+# Retry pacing for released jobs. A job that fails in under a second would
+# otherwise be redelivered several times a second until the DLQ catches it.
+RELEASE_BACKOFF_BASE_SECONDS = 2
+RELEASE_BACKOFF_MAX_SECONDS = 300
+
+
 class SqsJobQueue:
     """A job queue backed by an SQS standard queue."""
 
@@ -105,16 +111,35 @@ class SqsJobQueue:
             raise QueueError(f"cannot complete job {lease.job.job_id}: {exc}") from exc
 
     def release(self, lease: Lease) -> None:
-        # Zero visibility makes it immediately claimable again; SQS's redrive
-        # policy is what eventually dead-letters a job that keeps failing.
+        """Return a job to the queue, backing off as attempts accumulate.
+
+        Releasing at zero visibility redelivers the message *immediately*.
+        For a job that fails fast — an unreadable package, say — that is a hot
+        loop: the worker re-claims, fails in under a second, releases, and
+        repeats several times a second until the redrive policy finally
+        dead-letters it. It burns a worker and floods SQS with requests while
+        real submissions wait behind it.
+
+        Backing off exponentially keeps the retry (the machine really might
+        be the problem) without the spin.
+        """
         try:
             self._sqs.change_message_visibility(
                 QueueUrl=self._queue_url,
                 ReceiptHandle=lease.receipt,
-                VisibilityTimeout=0,
+                VisibilityTimeout=self._backoff_seconds(lease.delivery_attempt),
             )
         except Exception as exc:
             raise QueueError(f"cannot release job {lease.job.job_id}: {exc}") from exc
+
+    def _backoff_seconds(self, attempt: int) -> int:
+        """1st retry ~2s, then 4s, 8s… capped.
+
+        Capped well under the queue's visibility timeout so a released job is
+        never invisible for longer than a running one would be.
+        """
+        delay = RELEASE_BACKOFF_BASE_SECONDS * (2 ** max(0, attempt - 1))
+        return int(min(delay, RELEASE_BACKOFF_MAX_SECONDS))
 
     def depth(self) -> int:
         try:
