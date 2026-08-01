@@ -11,7 +11,7 @@ is already the component that owns that coupling.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from cxxprobe_worker.config import ControlPlaneConfig
 from cxxprobe_worker.jobs import JobResult, JobStatus
@@ -29,6 +29,22 @@ _VERDICT_RANK = {
     "CE": 6,
     "SE": 7,
 }
+
+
+class IControlPlane(Protocol):
+    """The seam between the worker and whatever records its verdicts.
+
+    Same pattern as ``IArtifactStorage`` and ``IJobQueue``: the daemon depends
+    on this, not on the HTTP client, so a deployment can substitute a
+    different destination and a test can substitute a recorder.
+    """
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def register(self, hostname: str, version: str = "") -> str | None: ...
+
+    def publish_result(self, result: JobResult) -> bool: ...
 
 
 class ControlPlaneError(RuntimeError):

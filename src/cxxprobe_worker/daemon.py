@@ -20,7 +20,7 @@ from types import FrameType
 
 from cxxprobe_worker import __version__
 from cxxprobe_worker.config import WorkerConfig
-from cxxprobe_worker.control_plane import ControlPlaneClient
+from cxxprobe_worker.control_plane import IControlPlane
 from cxxprobe_worker.executor import JobExecutor
 from cxxprobe_worker.jobs import JobResult
 from cxxprobe_worker.monitoring import HealthReporter, Logger, Metrics
@@ -38,7 +38,7 @@ class Worker:
         logger: Logger,
         metrics: Metrics,
         health: HealthReporter,
-        control_plane: ControlPlaneClient | None = None,
+        control_plane: IControlPlane | None = None,
     ) -> None:
         self._config = config
         self._queue = queue
@@ -80,9 +80,18 @@ class Worker:
         Only RETRYABLE goes back on the queue. A FAILED job is permanently
         broken and would fail identically forever; a SUCCEEDED job is done
         regardless of what verdict the submission earned.
+
+        The verdict is reported *before* the message is deleted, and a failure
+        to report releases the message instead of completing it. A submission
+        that was judged but whose verdict was lost stays "queued" for ever and
+        nothing ever notices — strictly worse than judging it twice.
         """
+        delivered = True
+        if self._control_plane is not None:
+            delivered = self._control_plane.publish_result(result)
+
         try:
-            if result.should_retry:
+            if result.should_retry or not delivered:
                 self._queue.release(lease)
                 self._metrics.incr("jobs_retried")
             else:

@@ -34,9 +34,19 @@ class CrashingExecutor:
         raise RuntimeError("executor exploded")
 
 
-def make_worker(config: WorkerConfig, queue: LocalJobQueue, executor, logger) -> Worker:
+def make_worker(
+    config: WorkerConfig, queue: LocalJobQueue, executor, logger, control_plane=None
+) -> Worker:
     metrics = Metrics()
-    return Worker(config, queue, executor, logger, metrics, HealthReporter(None, "w", metrics))
+    return Worker(
+        config,
+        queue,
+        executor,
+        logger,
+        metrics,
+        HealthReporter(None, "w", metrics),
+        control_plane=control_plane,
+    )
 
 
 def publish(queue: LocalJobQueue, tmp_path: Path, count: int) -> None:
@@ -168,3 +178,50 @@ def test_build_application_wires_everything_together(config):
     assert app.queue is not None
     assert app.storage is not None
     assert app.executor is not None
+
+
+class RecordingControlPlane:
+    """Stands in for ams-api and records what the daemon reported."""
+
+    def __init__(self, deliver: bool = True) -> None:
+        self.deliver = deliver
+        self.published: list[JobResult] = []
+        self.registered = False
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def register(self, hostname: str, version: str = "") -> str | None:
+        self.registered = True
+        return "worker-uid"
+
+    def publish_result(self, result: JobResult) -> bool:
+        self.published.append(result)
+        return self.deliver
+
+
+def test_a_judged_job_is_reported_to_the_control_plane(config, job_queue, logger, tmp_path):
+    """The whole point of the worker: the verdict must leave the machine.
+
+    Without this the job is judged, the queue message is deleted, and the
+    submission stays 'queued' for ever with nobody the wiser.
+    """
+    control_plane = RecordingControlPlane()
+    worker = make_worker(config, job_queue, StubExecutor(), logger, control_plane)
+    publish(job_queue, tmp_path, 1)
+    worker.run_once()
+
+    assert [r.job_id for r in control_plane.published] == ["job-0"]
+    assert job_queue.depth() == 0
+
+
+def test_an_undeliverable_verdict_keeps_the_job_on_the_queue(config, job_queue, logger, tmp_path):
+    """Losing a verdict is worse than judging twice — nothing detects the loss."""
+    control_plane = RecordingControlPlane(deliver=False)
+    worker = make_worker(config, job_queue, StubExecutor(), logger, control_plane)
+    publish(job_queue, tmp_path, 1)
+    worker.run_once()
+
+    assert len(control_plane.published) == 1
+    assert job_queue.depth() == 1, "the message must survive a failed report"
