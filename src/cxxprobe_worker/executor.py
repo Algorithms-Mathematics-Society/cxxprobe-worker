@@ -96,6 +96,41 @@ def _submission_failed_to_compile(report: dict[str, Any]) -> bool:
     return isinstance(exit_code, int) and exit_code >= 0
 
 
+def _submission_crashed_at_runtime(report: dict[str, Any]) -> bool:
+    """True when everything built but the submission's own code brought a
+    test run down.
+
+    A GTest binary that segfaults produces `behavior: ERROR` with zero cases
+    and cxxprobe exits 2 — the same exit code as "this host has no usable
+    sandbox". The discriminator is the **compile** section: if every step
+    built cleanly, the machine was working, and what failed afterwards was
+    the submitted code.
+
+    This matters more than it sounds. In a contest about RAII and manual
+    memory, a use-after-free is among the most likely things a contestant
+    writes; treating those as retryable meant each one was re-run until it
+    dead-lettered, burning the queue and leaving the submission stuck at
+    "queued" with no verdict ever recorded.
+    """
+    compile_section = report.get("compile")
+    if not isinstance(compile_section, dict) or not compile_section:
+        return False
+    # Every step must have actually built. A step that never launched means
+    # the sandbox, not the submission, is the problem.
+    if not all(
+        isinstance(step, dict) and step.get("ok") is True for step in compile_section.values()
+    ):
+        return False
+
+    tests = report.get("tests")
+    if not isinstance(tests, dict):
+        return False
+    return any(
+        isinstance(section, dict) and str(section.get("status", "")).upper() == "ERROR"
+        for section in tests.values()
+    )
+
+
 def _is_zip(path: Path) -> bool:
     return path.is_file() and zipfile.is_zipfile(path)
 
@@ -282,18 +317,27 @@ class JobExecutor:
             # not the machine's. It fails identically on every worker, so
             # retrying it just burns the queue — and in a contest a large
             # share of submissions are exactly this.
-            submitter_at_fault = report is not None and _submission_failed_to_compile(report)
+            would_not_compile = report is not None and _submission_failed_to_compile(report)
+            crashed = report is not None and _submission_crashed_at_runtime(report)
+            submitter_at_fault = would_not_compile or crashed
+
+            if would_not_compile:
+                message = f"submission failed to compile: {detail}"
+            elif crashed:
+                # Named distinctly from a compile failure because the remedy
+                # differs entirely: one is a syntax error, the other is
+                # memory-unsafe code that killed the test binary.
+                message = f"submission crashed during testing: {detail}"
+            else:
+                message = f"cxxprobe judge could not judge (exit {completed.returncode}): {detail}"
+
             result = JobResult(
                 job_id=job.job_id,
                 status=JobStatus.FAILED if submitter_at_fault else JobStatus.RETRYABLE,
                 exit_code=completed.returncode,
                 duration_seconds=duration,
                 report=report,
-                error=(
-                    f"submission failed to compile: {detail}"
-                    if submitter_at_fault
-                    else f"cxxprobe judge could not judge (exit {completed.returncode}): {detail}"
-                ),
+                error=message,
             )
         elif report is None:
             # Exit 0/1 means judging happened, so a missing report is

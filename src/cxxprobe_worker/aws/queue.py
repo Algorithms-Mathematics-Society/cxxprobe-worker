@@ -43,8 +43,14 @@ class SqsJobQueue:
         region: str | None = None,
         wait_time_seconds: int = 20,
         client: Any = None,
+        secondary_queue_url: str = "",
     ) -> None:
         self._queue_url = queue_url
+        # Polled only when the primary is empty. The rejudge queue is
+        # separate precisely so a bulk re-run cannot starve live submissions
+        # during a contest — but a queue nobody consumes is worse than no
+        # queue at all, and rejudged submissions simply sat there for ever.
+        self._secondary_queue_url = secondary_queue_url.strip()
         # Long-polling: 20s is SQS's maximum and the difference between one
         # API call per job and one every poll interval.
         self._wait_time = wait_time_seconds
@@ -73,15 +79,22 @@ class SqsJobQueue:
             raise QueueError(f"cannot publish job {job.job_id}: {exc}") from exc
 
     def claim(self) -> Lease | None:
+        lease = self._claim_from(self._queue_url)
+        if lease is not None or not self._secondary_queue_url:
+            return lease
+        # Nothing urgent waiting, so catch up on the backlog.
+        return self._claim_from(self._secondary_queue_url)
+
+    def _claim_from(self, queue_url: str) -> Lease | None:
         try:
             resp = self._sqs.receive_message(
-                QueueUrl=self._queue_url,
+                QueueUrl=queue_url,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=self._wait_time,
                 AttributeNames=["ApproximateReceiveCount"],
             )
         except Exception as exc:
-            raise QueueError(f"cannot receive from {self._queue_url}: {exc}") from exc
+            raise QueueError(f"cannot receive from {queue_url}: {exc}") from exc
 
         messages = resp.get("Messages", [])
         if not messages:
@@ -98,15 +111,20 @@ class SqsJobQueue:
             # Best effort: if the delete fails, SQS's redrive policy is the
             # backstop that eventually dead-letters it.
             with contextlib.suppress(Exception):
-                self._sqs.delete_message(QueueUrl=self._queue_url, ReceiptHandle=receipt)
+                self._sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
             return None
 
         attempt = int(message.get("Attributes", {}).get("ApproximateReceiveCount", "1"))
-        return Lease(job=job, receipt=receipt, delivery_attempt=attempt)
+        # The queue is carried on the lease: completing a rejudge against the
+        # primary queue would silently fail to delete it, and the job would
+        # be redelivered for ever.
+        return Lease(job=job, receipt=receipt, delivery_attempt=attempt, queue_url=queue_url)
 
     def complete(self, lease: Lease) -> None:
         try:
-            self._sqs.delete_message(QueueUrl=self._queue_url, ReceiptHandle=lease.receipt)
+            self._sqs.delete_message(
+                QueueUrl=lease.queue_url or self._queue_url, ReceiptHandle=lease.receipt
+            )
         except Exception as exc:
             raise QueueError(f"cannot complete job {lease.job.job_id}: {exc}") from exc
 
@@ -125,7 +143,7 @@ class SqsJobQueue:
         """
         try:
             self._sqs.change_message_visibility(
-                QueueUrl=self._queue_url,
+                QueueUrl=lease.queue_url or self._queue_url,
                 ReceiptHandle=lease.receipt,
                 VisibilityTimeout=self._backoff_seconds(lease.delivery_attempt),
             )

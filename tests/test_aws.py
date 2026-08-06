@@ -304,3 +304,51 @@ def test_uri_survives_a_queue_round_trip(sqs_queue):
     lease = queue.claim()
     assert lease is not None
     assert lease.job.package_path == uri
+
+
+def test_the_secondary_queue_is_drained_only_when_the_primary_is_empty(sqs_queue):
+    """The rejudge queue exists so a bulk re-run cannot starve live
+    submissions during a contest. But nothing consumed it, so rejudged
+    submissions sat in it for ever — a queue nobody reads is worse than no
+    queue at all.
+    """
+    _, client = sqs_queue
+    secondary_url = client.create_queue(QueueName="test-rejudge")["QueueUrl"]
+    primary_url = client.create_queue(QueueName="test-primary")["QueueUrl"]
+
+    queue = SqsJobQueue(
+        primary_url, wait_time_seconds=0, client=client, secondary_queue_url=secondary_url
+    )
+
+    client.send_message(QueueUrl=secondary_url, MessageBody=make_job("rejudged").model_dump_json())
+    client.send_message(QueueUrl=primary_url, MessageBody=make_job("live").model_dump_json())
+
+    first = queue.claim()
+    assert first is not None
+    assert first.job.job_id == "live", "live work must come first"
+
+    queue.complete(first)
+
+    second = queue.claim()
+    assert second is not None
+    assert second.job.job_id == "rejudged", "the backlog is drained once nothing is urgent"
+
+
+def test_a_lease_is_completed_against_the_queue_it_came_from(sqs_queue):
+    """Deleting from the wrong queue silently succeeds and leaves the message
+    in place, so the job is redelivered until it dead-letters."""
+    _, client = sqs_queue
+    secondary_url = client.create_queue(QueueName="test-rejudge-2")["QueueUrl"]
+    primary_url = client.create_queue(QueueName="test-primary-2")["QueueUrl"]
+
+    queue = SqsJobQueue(
+        primary_url, wait_time_seconds=0, client=client, secondary_queue_url=secondary_url
+    )
+    client.send_message(QueueUrl=secondary_url, MessageBody=make_job("r1").model_dump_json())
+
+    lease = queue.claim()
+    assert lease is not None
+    assert lease.queue_url == secondary_url
+
+    queue.complete(lease)
+    assert queue.claim() is None, "the message must actually be gone"

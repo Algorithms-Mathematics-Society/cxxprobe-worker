@@ -1,0 +1,62 @@
+{
+  "problem": "B: Pokemon RAII",
+  "slug": "b-pokemon-raii",
+  "submission": "/tmp/cxxprobe-worker/ws/d3ad8a71-5be3-4d8d-90ad-cfc10ddcd3ba-380b82a4/submission.cpp",
+  "overall": "PASS",
+  "tests": {
+    "manual": {
+      "status": "SKIPPED",
+      "passed": 0,
+      "total": 0,
+      "cases": []
+    },
+    "symbolic": {
+      "status": "SKIPPED",
+      "checks": []
+    },
+    "behavior": {
+      "status": "PASS",
+      "passed": 6,
+      "total": 6,
+      "cases": [
+        {
+          "name": "PokemonRAII.ConstructionAcquiresAndDestructionReleases",
+          "failed": false,
+          "time_ms": 0
+        },
+        {
+          "name": "PokemonRAII.MoveConstructionTransfersOwnershipWithoutDoubleCounting",
+          "failed": false,
+          "time_ms": 0
+        },
+        {
+          "name": "PokemonRAII.MoveAssignmentReleasesPreviouslyOwnedAllocation",
+          "failed": false,
+          "time_ms": 0
+        },
+        {
+          "name": "PokemonRAII.SelfMoveAssignmentIsSafe",
+          "failed": false,
+          "time_ms": 0
+        },
+        {
+          "name": "PokemonBehavior.TakeDamageClampsAtZeroNotNegative",
+          "failed": false,
+          "time_ms": 0
+        },
+        {
+          "name": "PokemonBehavior.TakeDamagePartialLeavesRemainingHp",
+          "failed": false,
+          "time_ms": 0
+        }
+      ]
+    }
+  },
+  "compile": {
+    "behavior_binary": {
+      "ok": true,
+      "exit_code": 0,
+      "diagnostics": "/tmp/cxxprobe-judge-9545/b-pokemon-raii/checker/behavior_gtest.cpp: In member function \u2018virtual void PokemonRAII_SelfMoveAssignmentIsSafe_Test::TestBody()\u2019:\n/tmp/cxxprobe-judge-9545/b-pokemon-raii/checker/behavior_gtest.cpp:80:11: warning: moving \u2018p\u2019 of type \u2018Pokemon\u2019 to itself [-Wself-move]\n   80 |         p = std::move(p);\n      |         ~~^~~~~~~~~~~~~~\n/tmp/cxxprobe-judge-9545/b-pokemon-raii/checker/behavior_gtest.cpp:80:11: note: remove \u2018std::move\u2019 call\n"
+    }
+  }
+}

@@ -89,6 +89,9 @@ class QueueConfig(BaseModel):
     """Local backend only."""
 
     queue_url: str = ""
+    # Polled only when `queue_url` is empty, so a backlog never delays live
+    # work. This is where rejudges land.
+    secondary_queue_url: str = ""
     """SQS backend only. Required when backend is ``sqs``."""
 
     wait_time_seconds: int = Field(default=20, ge=0, le=20)

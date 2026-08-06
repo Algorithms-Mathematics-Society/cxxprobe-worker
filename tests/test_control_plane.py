@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from cxxprobe_worker.config import ControlPlaneConfig
 from cxxprobe_worker.control_plane import ControlPlaneClient, summarise, worst_verdict
 from cxxprobe_worker.jobs import JobResult, JobStatus
@@ -136,3 +139,134 @@ def test_undeliverable_result_returns_false_so_the_message_survives():
         report={"compile": {"solution": {"ok": True}}, "tests": {"manual": {"cases": []}}},
     )
     assert client.publish_result(result) is False
+
+
+# ── the three test families ───────────────────────────────────────────────
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_a_behaviour_only_problem_is_not_reported_as_a_system_error():
+    """The bug this section exists for.
+
+    b-pokemon-raii has an empty tests/ by design — the GTest cases *are* the
+    tests. Reading only `tests.manual` found no verdicts and fell through to
+    SE, so a submission that passed 6/6 was shown to the contestant as the
+    judge having broken.
+    """
+    report = json.loads((FIXTURES / "behaviour_pass.json").read_text())
+    result = summarise(report)
+
+    assert result["verdict"] == "AC"
+    assert result["total_count"] == 6
+    assert result["passed_count"] == 6
+    assert all(c["kind"] == "behavior" for c in result["testcases"])
+
+
+def test_behaviour_cases_carry_the_gtest_name():
+    """A setter debugging a failure needs to know *which* assertion broke,
+    not just that something did."""
+    report = json.loads((FIXTURES / "behaviour_pass.json").read_text())
+    labels = [c["label"] for c in summarise(report)["testcases"]]
+
+    assert any("PokemonRAII." in label for label in labels)
+
+
+def test_a_failing_behaviour_case_is_wa_and_keeps_its_message():
+    report = {
+        "overall": "FAIL",
+        "tests": {
+            "behavior": {
+                "status": "FAIL",
+                "cases": [
+                    {"name": "Suite.Holds", "failed": False, "time_ms": 2},
+                    {
+                        "name": "Suite.Releases",
+                        "failed": True,
+                        "time_ms": 3,
+                        "failure_messages": ["expected 0 live allocations, saw 1"],
+                    },
+                ],
+            }
+        },
+    }
+    result = summarise(report)
+
+    assert result["verdict"] == "WA"
+    assert result["passed_count"] == 1
+    assert result["total_count"] == 2
+    failing = next(c for c in result["testcases"] if c["verdict"] == "WA")
+    assert "live allocations" in failing["checker_message"]
+
+
+def test_a_violated_symbolic_rule_is_a_wrong_answer():
+    """a-beet-cast rejects memcpy through these. A rule that only produced
+    prose would let a submission that broke the point of the problem pass."""
+    report = {
+        "overall": "FAIL",
+        "tests": {
+            "manual": {"cases": [{"label": "1", "verdict": "AC", "wall_time_ms": 4}]},
+            "symbolic": {
+                "status": "FAIL",
+                "checks": [
+                    {"kind": "must_include", "pattern": "std::bit_cast", "satisfied": True},
+                    {
+                        "kind": "must_not_include",
+                        "pattern": "memcpy",
+                        "satisfied": False,
+                        "message": "Use std::bit_cast for type punning instead of memcpy.",
+                    },
+                ],
+            },
+        },
+    }
+    result = summarise(report)
+
+    assert result["verdict"] == "WA", "passing the I/O tests is not enough on its own"
+    violated = [c for c in result["testcases"] if c["kind"] == "symbolic" and c["verdict"] == "WA"]
+    assert len(violated) == 1
+    assert "bit_cast" in violated[0]["checker_message"]
+
+
+def test_all_three_families_appear_in_one_submission():
+    report = {
+        "overall": "PASS",
+        "tests": {
+            "manual": {"cases": [{"label": "1", "verdict": "AC", "wall_time_ms": 5}]},
+            "behavior": {"cases": [{"name": "S.T", "failed": False, "time_ms": 1}]},
+            "symbolic": {"checks": [{"kind": "must_include", "pattern": "x", "satisfied": True}]},
+        },
+    }
+    result = summarise(report)
+
+    assert [c["kind"] for c in result["testcases"]] == ["io", "behavior", "symbolic"]
+    # Numbering is continuous across families so the UI can order them.
+    assert [c["testcase_no"] for c in result["testcases"]] == [1, 2, 3]
+    assert result["verdict"] == "AC"
+
+
+def test_a_report_with_no_checks_at_all_trusts_cxxprobes_own_overall():
+    """A problem may legitimately have nothing to run. PASS means the judge
+    was satisfied; ERROR means it could not do its job."""
+    assert summarise({"overall": "PASS", "tests": {}})["verdict"] == "AC"
+    assert summarise({"overall": "ERROR", "tests": {}})["verdict"] == "SE"
+
+
+def test_a_crashed_test_section_is_a_runtime_error_not_a_pass():
+    """A GTest binary that segfaults reports `behavior: ERROR` with zero
+    cases. The other families may have passed outright — reporting AC on the
+    strength of those would pass a submission whose code brought the run
+    down."""
+    report = {
+        "overall": "ERROR",
+        "compile": {"solution": {"ok": True}, "behavior_binary": {"ok": True}},
+        "tests": {
+            "manual": {"status": "PASS", "cases": [{"label": "1", "verdict": "AC"}]},
+            "symbolic": {"status": "PASS", "checks": []},
+            "behavior": {"status": "ERROR", "cases": []},
+        },
+    }
+    result = summarise(report)
+
+    assert result["verdict"] == "RE"
+    assert result["passed_count"] == 1, "the checks that did run still count"

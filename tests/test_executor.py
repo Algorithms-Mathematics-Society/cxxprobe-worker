@@ -336,3 +336,45 @@ def test_a_broken_sandbox_is_still_retryable(tmp_path, fake_cxxprobe, workspaces
     # never ran — that is the machine's fault, so it must be retried.
     assert result.status is JobStatus.RETRYABLE
     assert result.should_retry is True
+
+
+def test_a_submission_that_crashes_a_test_run_is_not_retried():
+    """The same class of bug as retrying compile errors, and it bites harder.
+
+    A use-after-free makes the GTest binary die: `behavior: ERROR`, zero
+    cases, cxxprobe exits 2 — the same exit code as a host with no usable
+    sandbox. Retrying it re-runs an identical failure until the job
+    dead-letters, leaving the submission stuck at "queued" for ever.
+
+    In a contest about RAII and manual memory this is among the most likely
+    things a contestant writes.
+    """
+    from cxxprobe_worker.executor import _submission_crashed_at_runtime
+
+    crashed = {
+        "compile": {"solution": {"ok": True}, "behavior_binary": {"ok": True}},
+        "tests": {"manual": {"status": "PASS"}, "behavior": {"status": "ERROR"}},
+    }
+    assert _submission_crashed_at_runtime(crashed) is True
+
+
+def test_a_broken_sandbox_is_still_retried():
+    """The distinction that makes the above safe: if a compile step never
+    launched, the machine is at fault and another worker may well succeed."""
+    from cxxprobe_worker.executor import _submission_crashed_at_runtime
+
+    broken_host = {
+        "compile": {"behavior_binary": {"ok": False, "exit_code": -1}},
+        "tests": {"behavior": {"status": "ERROR"}},
+    }
+    assert _submission_crashed_at_runtime(broken_host) is False
+
+
+def test_a_clean_run_is_not_mistaken_for_a_crash():
+    from cxxprobe_worker.executor import _submission_crashed_at_runtime
+
+    fine = {
+        "compile": {"solution": {"ok": True}},
+        "tests": {"manual": {"status": "PASS"}, "behavior": {"status": "FAIL"}},
+    }
+    assert _submission_crashed_at_runtime(fine) is False, "FAIL is a verdict, not a crash"

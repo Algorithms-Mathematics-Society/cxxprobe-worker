@@ -49,6 +49,7 @@ def build_application(config: WorkerConfig) -> Application:
         queue_url=config.queue.queue_url,
         region=config.aws.region,
         wait_time_seconds=config.queue.wait_time_seconds,
+        secondary_queue_url=config.queue.secondary_queue_url,
     )
     storage = build_storage(
         config.storage.backend,

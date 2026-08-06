@@ -41,6 +41,13 @@ class Lease:
     delivery_attempt: int = 1
     """How many times this job has been handed out, including now."""
 
+    queue_url: str = ""
+    """Which queue it came from, when a backend polls more than one.
+
+    Empty for the local queue, which has only one. Completing against the
+    wrong queue silently fails to delete the message, and the job is
+    redelivered for ever."""
+
 
 @runtime_checkable
 class IJobQueue(Protocol):
@@ -231,6 +238,7 @@ def build_queue(
     queue_url: str = "",
     region: str | None = None,
     wait_time_seconds: int = 20,
+    secondary_queue_url: str = "",
 ) -> IJobQueue:
     if backend == "local":
         return LocalJobQueue(root, visibility_timeout_seconds, max_delivery_attempts)
@@ -239,5 +247,10 @@ def build_queue(
             raise ValueError("queue.queue_url is required when queue.backend is 'sqs'")
         from cxxprobe_worker.aws.queue import SqsJobQueue
 
-        return SqsJobQueue(queue_url, region=region, wait_time_seconds=wait_time_seconds)
+        return SqsJobQueue(
+            queue_url,
+            region=region,
+            wait_time_seconds=wait_time_seconds,
+            secondary_queue_url=secondary_queue_url,
+        )
     raise ValueError(f"unknown queue backend: {backend!r}")
