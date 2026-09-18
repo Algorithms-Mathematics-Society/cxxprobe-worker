@@ -190,7 +190,18 @@ def _coerce_scalar(raw: str) -> Any:
     Keeps ``CXXPROBE_WORKER_CONCURRENCY=4`` an int and
     ``...KEEP_ON_FAILURE=true`` a bool, so overrides don't have to be
     stringly-typed at every call site.
+
+    The empty string is the one place we deliberately disagree with YAML.
+    ``yaml.safe_load("")`` is ``None``, but ``FOO=`` in an environment means
+    "empty", not "null" — and every field it is plausibly used on is a
+    ``str`` whose empty value *means* something: an empty
+    ``control_plane.base_url`` is standalone mode, an empty
+    ``secondary_queue_url`` is "don't poll a second queue". Parsing those as
+    ``None`` failed validation and took the worker down at startup, which is
+    a rotten way to discover you cannot turn a setting off.
     """
+    if raw == "":
+        return ""
     try:
         return yaml.safe_load(raw)
     except yaml.YAMLError:

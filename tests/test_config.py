@@ -94,3 +94,42 @@ def test_shipped_config_files_are_valid(environment: str):
     cfg = load_config(environment, Path("config"), environ={})
     assert isinstance(cfg, WorkerConfig)
     assert cfg.environment == environment
+
+
+def test_an_empty_override_clears_a_setting_rather_than_nulling_it(tmp_path):
+    """`FOO=` in an environment means empty, not null.
+
+    Every field this is plausibly used on is a `str` whose empty value means
+    something: an empty `control_plane.base_url` is standalone mode, an empty
+    `secondary_queue_url` is "don't poll a second queue". Parsing them as
+    `None` failed validation and took the worker down at startup — the worst
+    possible time to learn a setting cannot be turned off.
+    """
+    (tmp_path / "prod.yaml").write_text(
+        "worker_id: w\n"
+        "control_plane:\n"
+        "  base_url: https://api.example.test\n"
+        "queue:\n"
+        "  backend: local\n"
+    )
+    config = load_config(
+        "prod",
+        config_dir=tmp_path,
+        environ={"CXXPROBE_WORKER_CONTROL_PLANE__BASE_URL": ""},
+    )
+    assert config.control_plane.base_url == ""
+
+
+def test_typed_overrides_still_parse_as_yaml(tmp_path):
+    """Only the empty string is special-cased — everything else is unchanged."""
+    (tmp_path / "prod.yaml").write_text("worker_id: w\n")
+    config = load_config(
+        "prod",
+        config_dir=tmp_path,
+        environ={
+            "CXXPROBE_WORKER_CONCURRENCY": "6",
+            "CXXPROBE_WORKER_WORKSPACE__KEEP_ON_FAILURE": "true",
+        },
+    )
+    assert config.concurrency == 6
+    assert config.workspace.keep_on_failure is True
