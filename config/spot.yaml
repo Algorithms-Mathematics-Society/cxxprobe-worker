@@ -1,0 +1,69 @@
+# Contest-day Spot fleet.
+#
+# One of these runs on each ephemeral EC2 worker that exists only for the
+# few hours around a contest. Everything the box needs is here or comes from
+# the instance role — deliberately no secrets in this file, because it is
+# baked into a launch template that anyone with EC2 read can see.
+#
+# The two differences from `prod.yaml` that matter:
+#
+#   * `queue.backend: sqs` — these hosts exist to drain the shared queue.
+#     A Spot worker with the local backend would boot, find nothing, and
+#     judge nothing while the contest backs up.
+#
+#   * `concurrency: 8` — one per vCPU on a c6a.2xlarge. The single-worker
+#     box is memory-bound (1 GB, running Postgres and everything else, hence
+#     `concurrency: 1` there); these hosts have 16 GB and nothing else on
+#     them, so ~2 GB per concurrent compile is comfortable and cores are
+#     the thing worth saturating.
+#
+# `worker_id` is rewritten at boot with the instance id — see user-data —
+# so the control plane can tell twelve identical workers apart.
+environment: prod
+worker_id: spot-unknown
+concurrency: 8
+
+# Recycled by the fleet being torn down, not by a job count. 1000 would
+# never be reached in a three-hour contest anyway.
+max_jobs: 100000
+
+judge:
+  binary: /usr/local/bin/cxxprobe
+  timeout_seconds: 300
+  extra_args: []
+
+workspace:
+  # Instance store would be faster, but c6a.2xlarge has none and the EBS
+  # root is gp3 — fine for a compile scratch dir.
+  root: /var/lib/cxxprobe-worker/workspaces
+  keep_on_failure: false
+
+aws:
+  region: ap-south-1
+
+storage:
+  backend: s3
+  bucket: ams-prod-objects
+  prefix: artifacts
+
+queue:
+  backend: sqs
+  queue_url: https://sqs.ap-south-1.amazonaws.com/362249012864/submission-evaluation
+  # Rejudges only get looked at when the live queue is empty, so a bulk
+  # rejudge queued during a contest cannot starve the contest itself.
+  secondary_queue_url: https://sqs.ap-south-1.amazonaws.com/362249012864/rejudge
+  wait_time_seconds: 20
+  visibility_timeout_seconds: 900
+
+control_plane:
+  base_url: https://api.amsaccess.com
+  # Never in this file. Injected as CXXPROBE_WORKER_CONTROL_PLANE__API_KEY
+  # from SSM at boot, which is why the instance role can read one parameter.
+  api_key: ""
+  pool: spot
+  heartbeat_seconds: 10
+
+monitoring:
+  log_level: info
+  log_format: json
+  health_file: /var/run/cxxprobe-worker/health.json
