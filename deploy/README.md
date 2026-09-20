@@ -55,11 +55,38 @@ minutes in the middle of their contest.
 with EC2 read access. AWS access comes from the instance role
 (`ams-worker-role`); the control-plane key is pulled from SSM at boot.
 
-## Still to create in AWS
+## The account cannot hold this fleet in one region
 
-Nothing here runs until these exist — see `~/infra.md`:
+Proven by trying, 2026-09-18 and 2026-09-20. The AWS account is on the
+**Free Tier plan**, which permits only free-tier-eligible instance types —
+the largest being `c7i-flex.large` at **2 vCPU** — and caps EC2 at **5–8
+vCPU per region**. Lightsail is capped the same way (only `micro`/`nano`).
+The quota counts *vCPUs, not instances*, so picking smaller instances buys
+nothing.
 
-1. `ams-worker-role` + instance profile — S3 `problems/*`,`submissions/*` read,
-   `artifacts/*` write, consume both queues, read one SSM parameter. Nothing else.
-2. A launch template carrying `spot-user-data.sh`.
-3. The `ams-judge-spot` ASG at desired 0, across all three AZs.
+`judge-fleet-multiregion.sh` is the answer: the same quota exists in each of
+the 18 enabled regions, ~84 usable vCPU in total, which is the same order as
+the 96 the single-region plan assumed.
+
+```bash
+./deploy/judge-fleet-multiregion.sh up       # T-30 min, every region
+./deploy/judge-fleet-multiregion.sh status
+./deploy/judge-fleet-multiregion.sh down     # not optional
+```
+
+**Measured, 2026-09-20** — 1,000 real submissions (38% accepted, 40% wrong,
+12% compile error, 6% symbolic, 4% timeout) across 24 vCPU in ap-south-1,
+us-east-1 and us-west-2: **105 s, 9.5 jobs/s**. Extrapolated to the full
+~84 vCPU: **~33 jobs/s**, against a 2,000-competitor contest's estimated
+peak of 7–12 jobs/s.
+
+Cross-region costs throughput: 0.73 jobs/s/vCPU in the bucket's own region
+against 0.40 spread out, because the package is re-fetched from S3 on every
+job. See the package-caching entry in `~/ams-access/BACKLOG.md`.
+
+Prerequisite that does exist: IAM role `ams-worker-role` + instance profile
+`ams-worker-profile`.
+
+If the account ever leaves the Free Tier plan, `judge-fleet.sh` and the
+single-region ASG become the better option — fewer moving parts and no
+cross-region penalty — and need a Spot vCPU quota increase to ~64.
