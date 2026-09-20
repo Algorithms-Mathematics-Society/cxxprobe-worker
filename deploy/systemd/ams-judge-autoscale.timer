@@ -1,0 +1,13 @@
+[Unit]
+Description=Judging fleet autoscaler
+
+[Timer]
+# Every minute. An instance takes ~90 s from launch to first job, so this is
+# already the coarsest useful cadence — checking less often means a
+# submission spike waits longer than the boot it triggers.
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Size the judging fleet to the submission backlog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/cxxprobe-worker
+EnvironmentFile=/etc/cxxprobe-worker/aws.env
+Environment=HOME=/home/ubuntu
+# Hysteresis lives here, not in memory: every timer firing is a fresh
+# process, so an in-memory counter would reset each time, never reach the
+# scale-in threshold, and leave the fleet up for ever.
+Environment=JUDGE_STATE=/var/lib/cxxprobe-worker/fleet-state.json
+ExecStart=/usr/bin/python3 /home/ubuntu/cxxprobe-worker/deploy/judge_fleet.py scale
+TimeoutStartSec=300

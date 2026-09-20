@@ -68,11 +68,32 @@ nothing.
 the 18 enabled regions, ~84 usable vCPU in total, which is the same order as
 the 96 the single-region plan assumed.
 
+Two ways to drive it. **`judge_fleet.py` is the one to use** — it follows
+the queue, so the fleet is only as large as the backlog justifies and comes
+back to zero on its own. `judge-fleet-multiregion.sh` is the manual
+equivalent, kept for when you want a fixed size.
+
 ```bash
-./deploy/judge-fleet-multiregion.sh up       # T-30 min, every region
-./deploy/judge-fleet-multiregion.sh status
-./deploy/judge-fleet-multiregion.sh down     # not optional
+./deploy/judge_fleet.py init --user-data deploy/spot-user-data.sh   # once
+./deploy/judge_fleet.py watch          # T-30: size to the backlog, every 60s
+./deploy/judge_fleet.py status
+./deploy/judge_fleet.py destroy        # remove the fleet entirely
 ```
+
+For a real contest, install `systemd/ams-judge-autoscale.{service,timer}` on
+`ams-app` rather than leaving `watch` running on a laptop — a laptop that
+sleeps mid-contest stops scaling.
+
+**Sizing.** One instance (2 vCPU) sustains ~0.8 jobs/s warm, so the
+controller holds ~24 queued jobs per instance: a submission arriving at the
+back of the queue waits about 30 s. It scales out immediately and scales in
+only after three consecutive quiet checks, because coming down costs a full
+90 s boot to undo and the lull between two problems' bursts should not cost
+a fleet.
+
+**Verified end to end, 2026-09-20**: 300 jobs queued → controller scaled
+0 → 12 instances across three regions → drained → scaled back to 0 with no
+manual step.
 
 **Measured, 2026-09-20** — 1,000 real submissions (38% accepted, 40% wrong,
 12% compile error, 6% symbolic, 4% timeout) across 24 vCPU in ap-south-1,
