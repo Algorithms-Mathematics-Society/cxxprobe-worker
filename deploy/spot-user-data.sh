@@ -153,4 +153,19 @@ systemctl daemon-reload
 systemctl enable --now spot-drain
 
 echo "── ready ──────────────────────────────────────────────"
-systemctl is-active cxxprobe-worker
+# `is-active` immediately after `enable --now` proves nothing: a unit that
+# exits 2 on every start reports "active" in the window between restarts.
+# That is precisely how a fleet crash-looped for twenty minutes on
+# 2026-09-18 while every signal said healthy. So wait past a couple of
+# restart intervals and check it is *still* up, and dump the journal if not
+# — the console log is the only thing anyone can read on a box with no key.
+sleep 30
+if systemctl is-active --quiet cxxprobe-worker; then
+  echo "worker alive after 30s"
+  journalctl -u cxxprobe-worker -n 5 --no-pager -o cat || true
+else
+  echo "WORKER FAILED TO STAY UP"
+  systemctl status cxxprobe-worker --no-pager || true
+  journalctl -u cxxprobe-worker -n 40 --no-pager || true
+  exit 1
+fi
