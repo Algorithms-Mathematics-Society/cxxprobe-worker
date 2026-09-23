@@ -11,17 +11,19 @@
 #     A Spot worker with the local backend would boot, find nothing, and
 #     judge nothing while the contest backs up.
 #
-#   * `concurrency: 8` — one per vCPU on a c6a.2xlarge. The single-worker
-#     box is memory-bound (1 GB, running Postgres and everything else, hence
-#     `concurrency: 1` there); these hosts have 16 GB and nothing else on
-#     them, so ~2 GB per concurrent compile is comfortable and cores are
-#     the thing worth saturating.
+#   * `concurrency: 2` — one per vCPU on a `c7i-flex.large`. That instance
+#     type is not a choice: the account is on the AWS Free Tier plan, which
+#     permits only free-tier-eligible types, and 2 vCPU / 4 GB is the
+#     largest of them. The always-on box runs `concurrency: 1` because it is
+#     memory-bound at 1 GB with Postgres beside it; these have 4 GB and
+#     nothing else, so one compile per core fits. Raising this without
+#     raising the instance size is how judging starts OOMing.
 #
 # `worker_id` is rewritten at boot with the instance id — see user-data —
 # so the control plane can tell twelve identical workers apart.
 environment: prod
 worker_id: spot-unknown
-concurrency: 8
+concurrency: 2
 
 # Recycled by the fleet being torn down, not by a job count. 1000 would
 # never be reached in a three-hour contest anyway.

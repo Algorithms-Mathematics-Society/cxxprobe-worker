@@ -5,11 +5,11 @@
 # Runs once, as root, on a bare Ubuntu 24.04 x86_64 AMI. Everything a judge
 # host needs, from nothing to draining the queue, in about 90 seconds.
 #
-# **Why x86_64 and not Graviton.** The worker itself is Python and would run
-# anywhere, but it shells out to `/usr/local/bin/cxxprobe`, and the only
-# published build of that is `cxxprobe-x86_64-linux`. c6a.2xlarge spot is
-# ~$0.09/h against c6g's ~$0.086 — $0.21 more across a whole contest — which
-# is not worth maintaining a second architecture's build for.
+# **Why x86_64.** The worker itself is Python and would run anywhere, but it
+# shells out to `/usr/local/bin/cxxprobe`, and the only published build of
+# that is `cxxprobe-x86_64-linux`. The instance type is `c7i-flex.large`
+# because the account's Free Tier plan permits nothing larger — see
+# ~/infra.md.
 #
 # **No credentials here.** This file is visible to anyone who can read the
 # launch template. The instance role supplies AWS access; the control-plane
@@ -76,6 +76,10 @@ API_KEY=$(aws ssm get-parameter --region "$REGION" \
 install -m 600 /dev/null /etc/cxxprobe-worker/secrets.env
 cat > /etc/cxxprobe-worker/secrets.env <<EOF
 CXXPROBE_WORKER_CONTROL_PLANE__API_KEY=${API_KEY}
+# The queue and the bucket both live in ap-south-1. A worker in Oregon must
+# talk to those, not to its own region's — boto3 would otherwise default to
+# wherever the instance happens to be and find nothing.
+AWS_DEFAULT_REGION=${REGION}
 EOF
 
 echo "── directories ────────────────────────────────────────"
