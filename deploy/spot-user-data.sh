@@ -83,7 +83,11 @@ AWS_DEFAULT_REGION=${REGION}
 EOF
 
 echo "── directories ────────────────────────────────────────"
-mkdir -p /var/lib/cxxprobe-worker/workspaces /var/run/cxxprobe-worker
+# `packages` sits beside `workspaces` because the cache outlives any one
+# job: a package fetched for the first submission serves every one after it,
+# which is what makes a cross-region fleet affordable. See packages.py.
+mkdir -p /var/lib/cxxprobe-worker/workspaces /var/lib/cxxprobe-worker/packages \
+         /var/run/cxxprobe-worker
 
 echo "── service ────────────────────────────────────────────"
 cat > /etc/systemd/system/cxxprobe-worker.service <<'EOF'

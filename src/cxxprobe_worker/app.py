@@ -70,7 +70,21 @@ def build_application(config: WorkerConfig) -> Application:
 
         fetcher = S3Fetcher(region=config.aws.region)
 
-    executor = JobExecutor(config.judge, workspaces, storage, logger, fetcher=fetcher)
+    # Packages are worth keeping between jobs exactly when they come over
+    # the network. A local worker reads them off its own disk already.
+    packages = None
+    if fetcher is not None:
+        from cxxprobe_worker.packages import PackageCache
+
+        packages = PackageCache(
+            root=config.workspace.root.parent / "packages",
+            ttl_seconds=config.judge.package_cache_seconds,
+        )
+        packages.prune()
+
+    executor = JobExecutor(
+        config.judge, workspaces, storage, logger, fetcher=fetcher, packages=packages
+    )
 
     control_plane = ControlPlaneClient(config.control_plane, logger)
     worker = Worker(config, queue, executor, logger, metrics, health, control_plane=control_plane)

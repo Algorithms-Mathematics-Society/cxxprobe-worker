@@ -155,7 +155,9 @@ def _materialise(uri: str, destination: Path, fetcher: Any) -> Path:
     return fetched
 
 
-def _stage_inputs(job: Job, workspace: Workspace, fetcher: Any = None) -> tuple[str, Path]:
+def _stage_inputs(
+    job: Job, workspace: Workspace, fetcher: Any = None, cache: Any = None
+) -> tuple[str, Path]:
     """Bring the job's package and submission into its private workspace.
 
     Returns the ``cxxprobe judge`` flag to use for the package and its path.
@@ -175,8 +177,29 @@ def _stage_inputs(job: Job, workspace: Workspace, fetcher: Any = None) -> tuple[
 
     if is_remote(job.package_path):
         # A remote package is always a .cxxpkg zip; cxxprobe unpacks it.
-        staged = _materialise(job.package_path, workspace.root / "package.zip", fetcher)
-        return "--package", staged
+        #
+        # Fetched once and reused: in a contest this is one download per
+        # *submission* for a handful of distinct packages, and on a fleet
+        # spread across regions — which the account's quotas force — each of
+        # those is a cross-region round trip costing more than the job. See
+        # packages.py. The submission below is never cached; it is different
+        # every time.
+        staged = workspace.root / "package.zip"
+        if cache is not None:
+            cached = cache.fresh(job.package_path)
+            if cached is not None:
+                cache.hits += 1
+                try:
+                    shutil.copy2(cached, staged)
+                except OSError as exc:
+                    raise PreparationError(f"cannot stage cached package: {exc}") from exc
+                return "--package", staged
+            cache.misses += 1
+
+        fetched = _materialise(job.package_path, staged, fetcher)
+        if cache is not None:
+            cache.store(job.package_path, fetched)
+        return "--package", fetched
 
     package = Path(job.package_path)
     if _is_zip(package):
@@ -208,6 +231,7 @@ class JobExecutor:
         storage: IArtifactStorage,
         logger: Logger,
         fetcher: Any = None,
+        packages: Any = None,
     ) -> None:
         self._judge = judge
         self._workspaces = workspaces
@@ -215,6 +239,9 @@ class JobExecutor:
         self._log = logger
         # Only set when the deployment can receive s3:// job inputs.
         self._fetcher = fetcher
+        # Only set when packages are worth keeping between jobs, which is
+        # whenever they come from S3. None disables caching entirely.
+        self._packages = packages
 
     def execute(self, job: Job) -> JobResult:
         """Run one job to completion. Never raises for a job-level failure."""
@@ -241,9 +268,11 @@ class JobExecutor:
                 error=f"workspace unavailable: {exc}",
             )
 
+        cache = self._packages
         self._log.info(
             "job.finish",
             job_id=job.job_id,
+            package_cached=(cache.hits if cache is not None else None),
             status=result.status.value,
             exit_code=result.exit_code,
             duration_seconds=round(result.duration_seconds, 3),
@@ -252,7 +281,7 @@ class JobExecutor:
         return result
 
     def _run_in_workspace(self, job: Job, workspace: Workspace, started: float) -> JobResult:
-        package_flag, package_path = _stage_inputs(job, workspace, self._fetcher)
+        package_flag, package_path = _stage_inputs(job, workspace, self._fetcher, self._packages)
 
         argv = [
             self._judge.binary,

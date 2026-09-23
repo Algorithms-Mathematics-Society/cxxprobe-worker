@@ -46,6 +46,16 @@ class JudgeConfig(BaseModel):
 
     extra_args: list[str] = Field(default_factory=list)
 
+    package_cache_seconds: float = Field(default=900.0, ge=0)
+    """How long a downloaded problem package is reused before re-fetching.
+
+    Zero disables the cache. The default is short enough that editing a
+    problem mid-rehearsal is picked up without restarting workers in
+    seventeen regions, and long enough that a contest fetches each package a
+    handful of times rather than once per submission. See ``packages.py``
+    for why this is a TTL rather than an ETag check.
+    """
+
 
 class WorkspaceConfig(BaseModel):
     """Where per-job scratch directories are created."""
