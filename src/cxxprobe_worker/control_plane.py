@@ -42,7 +42,24 @@ class IControlPlane(Protocol):
     @property
     def enabled(self) -> bool: ...
 
+    @property
+    def registered(self) -> bool:
+        """Whether this worker has a control-plane identity yet."""
+        ...
+
     def register(self, hostname: str, version: str = "") -> str | None: ...
+
+    def heartbeat(
+        self, running_jobs: int = 0, cpu_percent: int = 0, memory_percent: int = 0
+    ) -> None:
+        """Say this worker is alive.
+
+        On the protocol deliberately. It was implemented on the client and
+        reachable on the server for months, but absent here — so the daemon
+        had no way to call it and never did, and every worker showed as
+        offline no matter how much it was judging.
+        """
+        ...
 
     def publish_result(self, result: JobResult) -> bool: ...
 
@@ -264,6 +281,16 @@ class ControlPlaneClient:
                 headers={"Authorization": f"Bearer {self._config.api_key}"},
             )
         return self._client
+
+    @property
+    def registered(self) -> bool:
+        """Whether this worker has a control-plane identity yet.
+
+        Without one `heartbeat` silently no-ops, so a registration that
+        failed at startup leaves the worker invisible while it keeps
+        judging — which is why the daemon retries on this.
+        """
+        return bool(self._worker_uid)
 
     def register(self, hostname: str, version: str = "") -> str | None:
         if not self.enabled:

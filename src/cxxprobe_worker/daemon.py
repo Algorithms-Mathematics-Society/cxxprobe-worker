@@ -49,6 +49,8 @@ class Worker:
         self._control_plane = control_plane
         self._stopping = threading.Event()
         self._jobs_claimed = 0
+        # Monotonic; -inf so the first check-in always fires.
+        self._last_check_in = float("-inf")
 
     @property
     def metrics(self) -> Metrics:
@@ -112,10 +114,31 @@ class Worker:
             return
         self._handle_result(lease, result)
 
+    def _check_in(self, running_jobs: int, *, force: bool = False) -> None:
+        """Tell the control plane this worker is alive, at most every interval.
+
+        Registration is retried here rather than only at startup. The worker
+        is often up before the API is — systemd starts both — and a single
+        `Connection refused` used to leave it permanently unregistered:
+        still judging, still reporting verdicts, but absent from the fleet
+        inventory for the life of the process. One production worker sat
+        like that for 54 days.
+        """
+        plane = self._control_plane
+        if plane is None or not plane.enabled:
+            return
+        now = time.monotonic()
+        interval = self._config.control_plane.heartbeat_seconds
+        if not force and now - self._last_check_in < interval:
+            return
+        self._last_check_in = now
+        if not plane.registered:
+            plane.register(hostname=self._config.worker_id, version=__version__)
+        plane.heartbeat(running_jobs=running_jobs)
+
     def run(self) -> int:
         """Poll until stopped or ``max_jobs`` is reached. Returns jobs processed."""
-        if self._control_plane is not None and self._control_plane.enabled:
-            self._control_plane.register(hostname=self._config.worker_id, version=__version__)
+        self._check_in(0, force=True)
 
         self._log.info(
             "worker.start",
@@ -144,6 +167,8 @@ class Worker:
                     self._sleep_between_polls()
                     continue
 
+                self._check_in(len(pending))
+
                 if lease is None:
                     self._health.write("idle")
                     self._sleep_between_polls()
@@ -166,8 +191,7 @@ class Worker:
 
     def run_once(self) -> JobResult | None:
         """Claim and run at most one job, then return. Used by ``--once``."""
-        if self._control_plane is not None and self._control_plane.enabled:
-            self._control_plane.register(hostname=self._config.worker_id, version=__version__)
+        self._check_in(0, force=True)
         try:
             lease = self._queue.claim()
         except QueueError as exc:

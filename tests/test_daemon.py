@@ -187,6 +187,8 @@ class RecordingControlPlane:
         self.deliver = deliver
         self.published: list[JobResult] = []
         self.registered = False
+        self.registrations = 0
+        self.heartbeats: list[int] = []
 
     @property
     def enabled(self) -> bool:
@@ -194,7 +196,13 @@ class RecordingControlPlane:
 
     def register(self, hostname: str, version: str = "") -> str | None:
         self.registered = True
+        self.registrations += 1
         return "worker-uid"
+
+    def heartbeat(
+        self, running_jobs: int = 0, cpu_percent: int = 0, memory_percent: int = 0
+    ) -> None:
+        self.heartbeats.append(running_jobs)
 
     def publish_result(self, result: JobResult) -> bool:
         self.published.append(result)
@@ -225,3 +233,42 @@ def test_an_undeliverable_verdict_keeps_the_job_on_the_queue(config, job_queue, 
 
     assert len(control_plane.published) == 1
     assert job_queue.depth() == 1, "the message must survive a failed report"
+
+
+class FailsToRegisterOnce(RecordingControlPlane):
+    """Registration refused the first time, as when the API is still booting."""
+
+    def register(self, hostname: str, version: str = "") -> str | None:
+        self.registrations += 1
+        if self.registrations == 1:
+            return None
+        self.registered = True
+        return "worker-uid"
+
+
+def test_the_worker_says_it_is_alive(config, job_queue, logger, tmp_path):
+    """`heartbeat` was implemented on the client and served by the API for
+    months, but absent from the protocol the daemon depends on — so nothing
+    ever called it, and every worker read as offline however much it judged.
+    """
+    control_plane = RecordingControlPlane()
+    worker = make_worker(config, job_queue, StubExecutor(), logger, control_plane)
+    worker.run_once()
+    assert control_plane.heartbeats, "the worker never checked in"
+
+
+def test_registration_is_retried_when_the_api_was_not_up_yet(config, job_queue, logger, tmp_path):
+    """systemd starts the worker and the API together, so a first
+    `Connection refused` is ordinary. It used to be permanent: the worker
+    stayed unregistered for the life of the process — still judging, still
+    reporting verdicts, absent from the fleet inventory. One production
+    worker sat like that for 54 days.
+    """
+    control_plane = FailsToRegisterOnce()
+    worker = make_worker(config, job_queue, StubExecutor(), logger, control_plane)
+    worker.run_once()
+    assert control_plane.registrations == 1 and not control_plane.registered
+
+    worker.run_once()
+    assert control_plane.registrations >= 2, "gave up after the first refusal"
+    assert control_plane.registered
