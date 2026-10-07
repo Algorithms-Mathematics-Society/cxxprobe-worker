@@ -270,3 +270,112 @@ def test_a_crashed_test_section_is_a_runtime_error_not_a_pass():
 
     assert result["verdict"] == "RE"
     assert result["passed_count"] == 1, "the checks that did run still count"
+
+
+# ── custom runs ──────────────────────────────────────────────────────────
+#
+# `judge --custom-cases` emits a different report shape: {status, compile,
+# cases} with no `tests` section, because the problem's own three checks
+# never ran. The ordinary path found no manual/behavior/symbolic section,
+# collected no verdicts and called the whole thing System Error -- a run
+# that worked perfectly, reported as a platform failure.
+
+CUSTOM_REPORT = {
+    "status": "FAIL",
+    "compile": {"solution": {"ok": True, "exit_code": 0}},
+    "cases": [
+        {
+            "label": "my case",
+            "ran": True,
+            "verdict": "AC",
+            "stdout": "12\n",
+            "stderr": "read ok\n",
+            "exit_code": 0,
+            "cpu_time_ms": 2,
+            "wall_time_ms": 4,
+            "peak_memory_bytes": 524288,
+        },
+        {
+            "label": "wrong on purpose",
+            "ran": True,
+            "verdict": "WA",
+            "stdout": "12\n",
+            "stderr": "",
+            "exit_code": 0,
+            "wall_time_ms": 3,
+            "peak_memory_bytes": 528384,
+        },
+        {
+            "label": "no expected",
+            "ran": True,
+            "stdout": "101\n",
+            "stderr": "",
+            "exit_code": 0,
+            "wall_time_ms": 2,
+            "peak_memory_bytes": 339968,
+        },
+    ],
+}
+
+
+def test_a_custom_run_is_not_a_system_error():
+    """The bug this replaces. No `tests` section meant no verdicts, and the
+    fallback called a perfectly good run SE."""
+    out = summarise(CUSTOM_REPORT)
+    assert out["verdict"] != "SE"
+    assert out["verdict"] == "WA", "the worst judged case drives it"
+
+
+def test_the_programs_output_survives_the_translation():
+    # The whole point of a custom run: the candidate wants to see this.
+    out = summarise(CUSTOM_REPORT)
+    assert [c["stdout"] for c in out["testcases"]] == ["12\n", "12\n", "101\n"]
+    assert out["testcases"][0]["stderr"] == "read ok\n"
+
+
+def test_an_unjudged_case_has_no_verdict_and_is_not_counted():
+    # No expected output was given, so there is nothing to be wrong about.
+    # Counting it would turn "show me what this prints" into a failure.
+    out = summarise(CUSTOM_REPORT)
+    assert out["testcases"][2]["verdict"] == ""
+    assert out["total_count"] == 2
+    assert out["passed_count"] == 1
+
+
+def test_a_run_with_nothing_judged_is_not_a_failure():
+    report = {
+        "status": "PASS",
+        "compile": {"solution": {"ok": True}},
+        "cases": [{"label": "Case 1", "ran": True, "stdout": "hi\n", "stderr": ""}],
+    }
+    out = summarise(report)
+    assert out["verdict"] == "AC"
+    assert out["total_count"] == 0
+    assert out["testcases"][0]["stdout"] == "hi\n"
+
+
+def test_a_custom_run_that_will_not_compile_still_reports_ce():
+    # The compile branch must win over the custom branch, or the candidate
+    # gets an empty case list instead of their compiler errors.
+    report = {
+        "status": "ERROR",
+        "compile": {"solution": {"ok": False, "diagnostics": "error: expected ';'"}},
+        "cases": [],
+    }
+    out = summarise(report)
+    assert out["verdict"] == "CE"
+    assert "expected ';'" in out["compile_output"]
+
+
+def test_an_ordinary_report_is_untouched_by_the_custom_branch():
+    # The dispatch keys on the absence of `tests`. A normal report must not
+    # fall into it whatever else it carries.
+    out = summarise(
+        {
+            "overall": "PASS",
+            "compile": {"solution": {"ok": True}},
+            "tests": {"manual": {"status": "PASS", "cases": [{"label": "1", "verdict": "AC"}]}},
+        }
+    )
+    assert out["verdict"] == "AC"
+    assert all("stdout" not in c for c in out["testcases"])

@@ -74,6 +74,62 @@ def worst_verdict(verdicts: list[str]) -> str:
     return max(verdicts, key=lambda v: _VERDICT_RANK.get(v, 0))
 
 
+def _custom_cases(report: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a `judge --custom-cases` report to what AMS records.
+
+    A different report shape from the ordinary one: cxxprobe emits
+    `{status, compile, cases}` with no `tests` section, because the problem's
+    own three checks never ran. Falling through the normal path found no
+    manual/behavior/symbolic section, collected no verdicts, and reported the
+    whole thing as System Error -- a run that worked perfectly, described as
+    a platform failure.
+
+    The verdict is the worst of the *judged* cases only. A case the candidate
+    gave no expected output for has no verdict to be worse than, and counting
+    it would turn "show me what this prints" into a failure.
+    """
+    cases: list[dict[str, Any]] = []
+    verdicts: list[str] = []
+    for i, c in enumerate(report.get("cases") or []):
+        verdict = str(c.get("verdict") or "")
+        if verdict:
+            verdicts.append(verdict)
+        cases.append(
+            {
+                "kind": "io",
+                "testcase_no": i + 1,
+                "label": str(c.get("label") or f"Case {i + 1}"),
+                # Empty, not "SE": an unjudged case is not a failed one, and
+                # the API keys "was this custom" off stdout being present
+                # rather than off the verdict.
+                "verdict": verdict,
+                "runtime_ms": int(c.get("wall_time_ms") or c.get("cpu_time_ms") or 0),
+                "memory_kb": int(c.get("peak_memory_bytes") or 0) // 1024,
+                "exit_code": int(c.get("exit_code") or 0),
+                "checker_message": str(c.get("checker_diagnostics") or ""),
+                "stdout": str(c.get("stdout") or ""),
+                "stderr": str(c.get("stderr") or ""),
+            }
+        )
+
+    compile_section = report.get("compile") or {}
+    solution = compile_section.get("solution") or {}
+    compile_output = str(solution.get("diagnostics") or "")
+
+    return {
+        # Nothing judged is not a failure -- it is the ordinary "just run it"
+        # case, and AC is what lets the UI show the output without a verdict.
+        "verdict": worst_verdict(verdicts) if verdicts else "AC",
+        "passed_count": sum(1 for c in cases if c["verdict"] == "AC"),
+        "total_count": sum(1 for c in cases if c["verdict"]),
+        "max_runtime_ms": max((c["runtime_ms"] for c in cases), default=0),
+        "max_memory_kb": max((c["memory_kb"] for c in cases), default=0),
+        "compile_output": compile_output[:20000],
+        "testcases": cases,
+        "error": "",
+    }
+
+
 def _manual_cases(section: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """I/O testcases: run the binary, compare output."""
     cases: list[dict[str, Any]] = []
@@ -200,6 +256,12 @@ def summarise(report: dict[str, Any] | None, error: str = "") -> dict[str, Any]:
             "testcases": [],
             "error": "",
         }
+
+    # A custom run carries `cases` at the top level and no `tests` section.
+    # Checked after the compile branch above, so a custom run that will not
+    # build still reports CE with its diagnostics rather than an empty list.
+    if "tests" not in report and "cases" in report:
+        return _custom_cases(report)
 
     tests = report.get("tests") or {}
     testcases: list[dict[str, Any]] = []
