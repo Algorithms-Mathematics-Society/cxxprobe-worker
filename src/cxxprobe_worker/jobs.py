@@ -63,6 +63,19 @@ class Job(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Opaque passthrough (submission id, contest id, …). Never interpreted."""
 
+    custom_cases: list[dict[str, Any]] | None = None
+    """Candidate-supplied cases: ``[{"label":…, "input":…, "expected":…}]``.
+
+    When set, the job runs ONLY these and the problem's own tests are never
+    opened, so a hidden input or answer cannot reach the result. ``expected``
+    is optional per case: without it the case is run but not judged, which is
+    the "just show me what it prints" path.
+
+    ``None`` and ``[]`` are deliberately different. ``None`` is an ordinary
+    judging job; ``[]`` would be a custom run with nothing to run, which the
+    executor refuses rather than silently judging the real tests.
+    """
+
     @field_validator("package_path", "submission_path", mode="before")
     @classmethod
     def _coerce_location(cls, v: Any) -> str:

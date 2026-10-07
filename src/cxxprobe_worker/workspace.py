@@ -45,6 +45,17 @@ class Workspace:
         """Where `cxxprobe judge --output` writes its JSON report."""
         return self.root / "report.json"
 
+    @property
+    def custom_cases_path(self) -> Path:
+        """Candidate-supplied cases, when the job carries any.
+
+        Written into the job's own workspace rather than passed on the
+        command line: the input is arbitrary candidate text, and argv is the
+        one place it must never appear -- it would land in the process table
+        and in any log that records the invocation.
+        """
+        return self.root / "custom-cases.json"
+
 
 class WorkspaceManager:
     """Creates and destroys per-job workspaces under a shared root."""

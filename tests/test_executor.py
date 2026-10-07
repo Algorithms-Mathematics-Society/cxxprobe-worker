@@ -378,3 +378,98 @@ def test_a_clean_run_is_not_mistaken_for_a_crash():
         "tests": {"manual": {"status": "PASS"}, "behavior": {"status": "FAIL"}},
     }
     assert _submission_crashed_at_runtime(fine) is False, "FAIL is a verdict, not a crash"
+
+
+# ── custom cases ─────────────────────────────────────────────────────────
+#
+# A candidate running their own input. The executor's whole job here is to
+# get the cases onto disk and name them on the command line; cxxprobe owns
+# the rest. What matters is that the input text never reaches argv, and that
+# an empty list cannot quietly become an ordinary judging run.
+
+RECORDER = (
+    "#!/bin/sh\n"
+    'out=""; prev=""\n'
+    'for a in "$@"; do if [ "$prev" = "--output" ]; then out="$a"; fi; prev="$a"; done\n'
+    'printf \'{"argv": "%s"}\' "$*" > "$out"\n'
+    "exit 0\n"
+)
+
+
+def _recorder(tmp_path):
+    path = tmp_path / "recorder"
+    path.write_text(RECORDER)
+    path.chmod(0o755)
+    return path
+
+
+def test_custom_cases_are_written_to_a_file_and_named_on_the_command_line(
+    tmp_path, workspaces, storage, logger
+):
+    package, submission = make_inputs(tmp_path)
+    executor = build_executor(_recorder(tmp_path), workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(
+            job_id="j1",
+            package_path=str(package),
+            submission_path=str(submission),
+            custom_cases=[{"label": "mine", "input": "5 7\n", "expected": "12\n"}],
+        )
+    )
+    assert result.status is JobStatus.SUCCEEDED
+    assert result.report is not None
+    assert "--custom-cases" in result.report["argv"]
+
+
+def test_the_candidates_input_never_appears_in_argv(tmp_path, workspaces, storage, logger):
+    # argv lands in the process table and in any log that records the
+    # invocation. The input is arbitrary candidate text and must stay in the
+    # file.
+    package, submission = make_inputs(tmp_path)
+    executor = build_executor(_recorder(tmp_path), workspaces, storage, logger)
+
+    secret = "IDENTIFIABLE_CANDIDATE_INPUT"
+    result = executor.execute(
+        Job(
+            job_id="j1",
+            package_path=str(package),
+            submission_path=str(submission),
+            custom_cases=[{"label": "c", "input": secret, "expected": secret}],
+        )
+    )
+    assert result.report is not None
+    assert secret not in result.report["argv"]
+
+
+def test_an_ordinary_job_names_no_custom_cases(tmp_path, workspaces, storage, logger):
+    package, submission = make_inputs(tmp_path)
+    executor = build_executor(_recorder(tmp_path), workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
+    assert result.report is not None
+    assert "--custom-cases" not in result.report["argv"]
+
+
+def test_empty_custom_cases_is_refused_rather_than_judged_normally(
+    tmp_path, workspaces, storage, logger
+):
+    # The dangerous reading of [] is "nothing custom, judge normally", which
+    # would run the real tests and hand back a scored-looking verdict for a
+    # request that asked for the candidate's own input.
+    package, submission = make_inputs(tmp_path)
+    executor = build_executor(_recorder(tmp_path), workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(
+            job_id="j1",
+            package_path=str(package),
+            submission_path=str(submission),
+            custom_cases=[],
+        )
+    )
+    assert result.status is JobStatus.FAILED
+    assert result.error is not None
+    assert "empty" in result.error

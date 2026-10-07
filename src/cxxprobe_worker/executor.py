@@ -5,6 +5,7 @@ deliberately thin. It does not know what a verdict is, how a checker works,
 or what a problem package contains. It knows one command:
 
     cxxprobe judge (--package ZIP | --problem-dir DIR)
+            [--custom-cases FILE]
                    --submission FILE --output REPORT.json
 
 and one contract:
@@ -292,8 +293,34 @@ class JobExecutor:
             str(workspace.submission_path),
             "--output",
             str(workspace.report_path),
-            *self._judge.extra_args,
         ]
+
+        if job.custom_cases is not None:
+            # An empty list is a client bug, and the dangerous reading of it
+            # would be "no custom cases, judge normally" -- which runs the
+            # real tests and returns a scored-looking verdict for something
+            # the candidate asked to run against their own input. Refuse.
+            if not job.custom_cases:
+                return JobResult(
+                    job_id=job.job_id,
+                    status=JobStatus.FAILED,
+                    duration_seconds=time.monotonic() - started,
+                    error="custom_cases was empty; refusing to fall back to the problem's tests",
+                )
+            try:
+                workspace.custom_cases_path.write_text(
+                    json.dumps(job.custom_cases), encoding="utf-8"
+                )
+            except OSError as exc:
+                return JobResult(
+                    job_id=job.job_id,
+                    status=JobStatus.RETRYABLE,
+                    duration_seconds=time.monotonic() - started,
+                    error=f"cannot write custom cases: {exc}",
+                )
+            argv += ["--custom-cases", str(workspace.custom_cases_path)]
+
+        argv += self._judge.extra_args
         self._log.debug("judge.invoke", job_id=job.job_id, argv=argv)
 
         try:
