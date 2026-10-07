@@ -11,15 +11,16 @@ thousands of times.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from cxxprobe_worker.packages import PackageCache, key_for
 
 
-def make_cache(tmp_path, ttl=900.0):
+def make_cache(tmp_path: Path, ttl: float = 900.0) -> PackageCache:
     return PackageCache(root=tmp_path / "packages", ttl_seconds=ttl)
 
 
-def a_package(tmp_path, name="pkg.zip", body=b"PK\x03\x04payload"):
+def a_package(tmp_path: Path, name: str = "pkg.zip", body: bytes = b"PK\x03\x04payload") -> Path:
     path = tmp_path / name
     path.write_bytes(body)
     return path
@@ -48,8 +49,13 @@ def test_two_packages_never_collide(tmp_path):
     cache.store("s3://bucket/round-1.cxxpkg", a_package(tmp_path, "one.zip", b"ONE"))
     cache.store("s3://bucket/round_1.cxxpkg", a_package(tmp_path, "two.zip", b"TWO"))
 
-    assert cache.fresh("s3://bucket/round-1.cxxpkg").read_bytes() == b"ONE"
-    assert cache.fresh("s3://bucket/round_1.cxxpkg").read_bytes() == b"TWO"
+    # Pulled out rather than chained: `fresh` returns None on a miss, and a
+    # miss here is a different bug from a collision -- worth saying which.
+    one = cache.fresh("s3://bucket/round-1.cxxpkg")
+    two = cache.fresh("s3://bucket/round_1.cxxpkg")
+    assert one is not None and two is not None
+    assert one.read_bytes() == b"ONE"
+    assert two.read_bytes() == b"TWO"
     assert key_for("s3://bucket/round-1.cxxpkg") != key_for("s3://bucket/round_1.cxxpkg")
 
 

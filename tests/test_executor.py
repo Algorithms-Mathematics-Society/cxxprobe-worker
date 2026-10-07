@@ -396,7 +396,7 @@ RECORDER = (
 )
 
 
-def _recorder(tmp_path):
+def _recorder(tmp_path: Path) -> Path:
     path = tmp_path / "recorder"
     path.write_text(RECORDER)
     path.chmod(0o755)
