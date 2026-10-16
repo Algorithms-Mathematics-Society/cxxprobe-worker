@@ -44,6 +44,16 @@ with a different cxxprobe than the rest of the fleet would produce verdicts
 nobody could reproduce. Bump `CXXPROBE_VERSION` in the user-data
 deliberately, and never to a floating ref.
 
+**Two compilers, and the boot proves the second one works.** Hosts get the
+default `g++` (GCC 13 on 24.04) and `g++-14` (14.2, noble-updates). Problems
+that use deducing `this`, `std::generator`, `ranges::to` or `std::print`
+set `compiler: { cxx: g++-14 }`. The default stays 13 so older problems
+judge as they always did. The boot compiles and runs a program that uses all
+of those features, and fails if it can't. `ams-app` judges as well, and
+ams-api's `deploy.sh` installs `g++-14` and runs the same check there.
+**Changing the user-data changes nothing until `judge_fleet.py init` runs
+again:** the launch templates hold a copy of it.
+
 **Spot interruptions are handled, not feared.** `spot-drain` watches the
 instance-action metadata endpoint and stops the worker on the two-minute
 notice; SIGTERM means "stop claiming, finish what you have". Without it an

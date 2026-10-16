@@ -26,9 +26,39 @@ echo "── packages ───────────────────�
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # `cgroup-tools` because cxxprobe creates a cgroup per run; `unzip` for the
-# AWS CLI; g++ is what it actually compiles submissions with.
+# AWS CLI; g++ is what it actually compiles submissions with. `g++-14` sits
+# beside the default g++ (13 on 24.04) because 13 lacks deducing `this`,
+# `std::generator` and `ranges::to`; a problem opts in with
+# `compiler: { cxx: g++-14 }`. Install both, change neither default, so
+# problems written for `g++` judge exactly as they did.
 apt-get install -y -qq --no-install-recommends \
-  ca-certificates curl unzip git g++ cgroup-tools python3 python3-venv
+  ca-certificates curl unzip git g++ g++-14 cgroup-tools python3 python3-venv
+
+echo "── toolchain check ────────────────────────────────────"
+# A host whose g++-14 cannot build these would return Compilation Error for
+# every submission to every problem that asks for it, and look healthy while
+# doing it. Fail the boot instead. The same check runs on ams-app's deploy.
+cat > /tmp/toolchain-check.cpp <<'EOF'
+#include <expected>
+#include <generator>
+#include <print>
+#include <ranges>
+#include <vector>
+struct Grid {
+    int v[4]{0, 1, 2, 3};
+    auto&& operator[](this auto&& self, int i, int j) { return self.v[i * 2 + j]; }
+};
+std::generator<int> count(int n) { for (int i = 0; i < n; ++i) co_yield i; }
+int main() {
+    auto v = count(3) | std::ranges::to<std::vector>();
+    std::expected<int, int> e = Grid{}[1, 1];
+    std::println("{}", v.size() + *e == 6 ? "ok" : "wrong");
+}
+EOF
+g++-14 --version | head -1
+g++-14 -std=c++23 -O2 -o /tmp/toolchain-check /tmp/toolchain-check.cpp
+[ "$(/tmp/toolchain-check)" = ok ]
+rm -f /tmp/toolchain-check /tmp/toolchain-check.cpp
 
 echo "── aws cli ────────────────────────────────────────────"
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
