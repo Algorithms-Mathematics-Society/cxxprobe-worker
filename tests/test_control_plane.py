@@ -65,6 +65,30 @@ def test_one_wrong_case_summarises_to_wa():
     assert summarise(report)["verdict"] == "WA"
 
 
+def test_a_compile_error_on_a_gtest_only_problem_is_ce():
+    """No `solution` step: the submission is built into the GTest binary.
+    Reported as SE, the candidate never sees their compiler error."""
+    report = {
+        "compile": {
+            "behavior_binary": {"ok": False, "exit_code": 1, "diagnostics": "expected '>'"}
+        },
+        "tests": {"behavior": {"status": "ERROR"}},
+    }
+    out = summarise(report)
+    assert out["verdict"] == "CE"
+    assert "expected '>'" in out["compile_output"]
+
+
+def test_a_compile_step_that_never_launched_is_not_ce():
+    """CE carries a penalty. A sandbox that could not start the compiler is
+    the platform's fault, and must never be charged to the candidate."""
+    report = {
+        "compile": {"solution": {"ok": False, "exit_code": -1, "diagnostics": "cgroup: denied"}},
+        "tests": {},
+    }
+    assert summarise(report)["verdict"] != "CE"
+
+
 def test_a_failed_solution_compile_is_ce_not_a_lost_job():
     """CE is a real verdict — the pipeline worked, the code didn't."""
     report = {
@@ -359,7 +383,9 @@ def test_a_custom_run_that_will_not_compile_still_reports_ce():
     # gets an empty case list instead of their compiler errors.
     report = {
         "status": "ERROR",
-        "compile": {"solution": {"ok": False, "diagnostics": "error: expected ';'"}},
+        "compile": {
+            "solution": {"ok": False, "exit_code": 1, "diagnostics": "error: expected ';'"}
+        },
         "cases": [],
     }
     out = summarise(report)

@@ -235,6 +235,45 @@ def test_an_undeliverable_verdict_keeps_the_job_on_the_queue(config, job_queue, 
     assert job_queue.depth() == 1, "the message must survive a failed report"
 
 
+def test_a_retryable_job_is_retried_until_its_last_delivery(config, job_queue, logger, tmp_path):
+    control_plane = RecordingControlPlane()
+    worker = make_worker(
+        config, job_queue, StubExecutor(JobStatus.RETRYABLE), logger, control_plane
+    )
+    publish(job_queue, tmp_path, 1)
+
+    for _ in range(config.queue.max_delivery_attempts - 1):
+        worker.run_once()
+
+    assert job_queue.depth() == 1
+    assert all(r.status is JobStatus.RETRYABLE for r in control_plane.published)
+
+
+def test_the_last_delivery_reports_a_failure_instead_of_dead_lettering(
+    config, job_queue, logger, tmp_path
+):
+    """Released on its last delivery, a job dead-letters and nobody ever
+    reports it, so its submission shows "queued" for ever. The last attempt
+    must report a failure, so the candidate gets a verdict."""
+    control_plane = RecordingControlPlane()
+    worker = make_worker(
+        config, job_queue, StubExecutor(JobStatus.RETRYABLE), logger, control_plane
+    )
+    publish(job_queue, tmp_path, 1)
+
+    for _ in range(config.queue.max_delivery_attempts):
+        worker.run_once()
+
+    last = control_plane.published[-1]
+    assert last.status is JobStatus.FAILED
+    assert last.error is not None
+    assert "after 5 attempts" in last.error
+    assert last.report is None, "a gave-up job must report SE, never a penalised verdict"
+    assert job_queue.depth() == 0
+    assert job_queue.dead_letter_count() == 0
+    assert worker.metrics.get("jobs_gave_up") == 1
+
+
 class FailsToRegisterOnce(RecordingControlPlane):
     """Registration refused the first time, as when the API is still booting."""
 

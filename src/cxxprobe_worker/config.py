@@ -117,6 +117,12 @@ class QueueConfig(BaseModel):
     A retryable classification can't distinguish "this host is broken" from
     "this package is broken" on the first attempt, so a cap is what stops a
     permanently-bad job from recirculating for ever.
+
+    On the final delivery the worker reports the job as failed rather than
+    releasing it (see ``Worker._give_up_if_last_delivery``). For SQS this
+    must equal the queue's redrive ``maxReceiveCount`` (5 for
+    ``submission-evaluation``). If it's set higher, the message dead-letters
+    before any worker gives up, which is the silent "queued for ever" case.
     """
 
 

@@ -22,7 +22,7 @@ from cxxprobe_worker import __version__
 from cxxprobe_worker.config import WorkerConfig
 from cxxprobe_worker.control_plane import IControlPlane
 from cxxprobe_worker.executor import JobExecutor
-from cxxprobe_worker.jobs import JobResult
+from cxxprobe_worker.jobs import JobResult, JobStatus
 from cxxprobe_worker.monitoring import HealthReporter, Logger, Metrics
 from cxxprobe_worker.queue import IJobQueue, Lease, QueueError
 
@@ -76,6 +76,41 @@ class Worker:
         cap = self._config.max_jobs
         return cap is None or self._jobs_claimed < cap
 
+    def _give_up_if_last_delivery(self, lease: Lease, result: JobResult) -> JobResult:
+        """On the final delivery, turn "retry" into a reported failure.
+
+        A retryable job released on its last delivery goes to the dead-letter
+        queue, and no worker ever reports it. Its submission then shows
+        "queued" for ever: the candidate can't tell it failed, and nothing
+        alerts anyone. Reporting a failure instead gives them a System Error
+        they can resubmit after, and the worker's error text is on the job row
+        for whoever investigates. If a later rejudge succeeds, `apply_result`
+        replaces it, because only COMPLETED is final.
+        """
+        if not result.should_retry:
+            return result
+        if lease.delivery_attempt < self._config.queue.max_delivery_attempts:
+            return result
+        self._log.error(
+            "job.gave_up",
+            job_id=result.job_id,
+            attempts=lease.delivery_attempt,
+            error=result.error,
+        )
+        self._metrics.incr("jobs_gave_up")
+        # The report is dropped so the verdict is SE. A report from a broken
+        # host can look like a compile error, and CE carries a penalty.
+        return result.model_copy(
+            update={
+                "status": JobStatus.FAILED,
+                "report": None,
+                "error": (
+                    f"no worker could judge this after {lease.delivery_attempt} attempts: "
+                    f"{result.error or '(no detail)'}"
+                ),
+            }
+        )
+
     def _handle_result(self, lease: Lease, result: JobResult) -> None:
         """Complete or release a job based on how it ended.
 
@@ -88,6 +123,8 @@ class Worker:
         that was judged but whose verdict was lost stays "queued" for ever and
         nothing ever notices — strictly worse than judging it twice.
         """
+        result = self._give_up_if_last_delivery(lease, result)
+
         delivered = True
         if self._control_plane is not None:
             delivered = self._control_plane.publish_result(result)

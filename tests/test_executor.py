@@ -311,6 +311,57 @@ def test_a_submission_that_will_not_compile_is_permanent_not_retryable(
     assert "failed to compile" in result.error
 
 
+def test_a_compile_error_on_a_gtest_only_problem_is_permanent(
+    tmp_path, fake_cxxprobe, workspaces, storage, logger
+):
+    """A real 2026-10-06 Pokemon RAII run: no `solution` step, only the
+    submission built into the GTest binary, and that compile failed.
+    Treated as retryable, it dead-lettered and stayed "queued" for ever."""
+    package, submission = make_inputs(tmp_path)
+    report = json.dumps(
+        {
+            "slug": "b-pokemon-raii",
+            "overall": "ERROR",
+            "compile": {
+                "behavior_binary": {
+                    "ok": False,
+                    "exit_code": 1,
+                    "diagnostics": "source.cpp:11:43: error: expected '>' before '}' token",
+                }
+            },
+            "tests": {
+                "manual": {"status": "SKIPPED"},
+                "symbolic": {"status": "SKIPPED"},
+                "behavior": {"status": "ERROR"},
+            },
+        }
+    )
+    binary = fake_cxxprobe(exit_code=2, report=report)
+    executor = build_executor(binary, workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
+    assert result.status is JobStatus.FAILED
+    assert result.error is not None
+    assert "failed to compile" in result.error
+    assert "expected '>'" in result.error
+
+
+def test_a_checker_that_will_not_build_is_still_retryable():
+    """The checker doesn't contain the submission, so its failing to build
+    says nothing about the candidate's code."""
+    from cxxprobe_worker.executor import _submission_failed_to_compile
+
+    report = {
+        "compile": {
+            "solution": {"ok": True, "exit_code": 0},
+            "checker_binary": {"ok": False, "exit_code": 1},
+        }
+    }
+    assert _submission_failed_to_compile(report) is False
+
+
 def test_a_broken_sandbox_is_still_retryable(tmp_path, fake_cxxprobe, workspaces, storage, logger):
     """Same exit code and report shape as a CE — but exit_code -1 gives it away."""
     package, submission = make_inputs(tmp_path)

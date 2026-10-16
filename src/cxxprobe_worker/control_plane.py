@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from cxxprobe_worker.config import ControlPlaneConfig
+from cxxprobe_worker.executor import _diagnostics_from, _submission_failed_to_compile
 from cxxprobe_worker.jobs import JobResult, JobStatus
 from cxxprobe_worker.monitoring import Logger
 
@@ -243,16 +244,20 @@ def summarise(report: dict[str, Any] | None, error: str = "") -> dict[str, Any]:
 
     compile_section = report.get("compile") or {}
     solution = compile_section.get("solution") or {}
+    # Warnings from a build that succeeded are still worth showing.
     compile_output = str(solution.get("diagnostics") or "")
 
-    if solution.get("ok") is False:
+    # CE only when the compiler actually ran and rejected the submission, in
+    # any step that builds it. A GTest-only problem has no `solution` step,
+    # and a step that never launched is the machine's fault, not a CE.
+    if _submission_failed_to_compile(report):
         return {
             "verdict": "CE",
             "passed_count": 0,
             "total_count": 0,
             "max_runtime_ms": 0,
             "max_memory_kb": 0,
-            "compile_output": compile_output[:20000],
+            "compile_output": (_diagnostics_from(report) or compile_output)[:20000],
             "testcases": [],
             "error": "",
         }

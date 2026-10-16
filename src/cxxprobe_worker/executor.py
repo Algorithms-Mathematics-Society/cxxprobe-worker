@@ -44,6 +44,9 @@ from cxxprobe_worker.workspace import Workspace, WorkspaceManager
 # `cxxprobe judge` exit codes. 0 and 1 both mean "judging happened".
 JUDGED_EXIT_CODES = frozenset({0, 1})
 
+# The `compile` steps in a cxxprobe report that build the submission itself.
+SUBMISSION_COMPILE_STEPS = ("solution", "behavior_binary")
+
 
 class PreparationError(RuntimeError):
     """The job's inputs could not be staged into the workspace.
@@ -86,15 +89,28 @@ def _submission_failed_to_compile(report: dict[str, Any]) -> bool:
     a syntax error fails identically on every worker, and during a contest
     those are a large share of all submissions, so retrying them would
     starve the queue of real work.
+
+    The submission is compiled by more than one step. On a problem judged
+    only by GTest there is no `solution` step at all: the submission is
+    built into `behavior_binary` together with the checker. Looking at
+    `solution` alone took every compile error on such a problem for a broken
+    machine, retried it until it dead-lettered, and left the submission
+    "queued" for ever. That happened to a real Pokemon RAII run on 2026-10-06.
+    `checker_binary` is deliberately not on the list: it doesn't contain the
+    submission, and package verification has already built it against the
+    reference solution.
     """
     compile_section = report.get("compile")
     if not isinstance(compile_section, dict):
         return False
-    solution = compile_section.get("solution")
-    if not isinstance(solution, dict) or solution.get("ok") is not False:
-        return False
-    exit_code = solution.get("exit_code")
-    return isinstance(exit_code, int) and exit_code >= 0
+    for name in SUBMISSION_COMPILE_STEPS:
+        step = compile_section.get(name)
+        if not isinstance(step, dict) or step.get("ok") is not False:
+            continue
+        exit_code = step.get("exit_code")
+        if isinstance(exit_code, int) and exit_code >= 0:
+            return True
+    return False
 
 
 def _submission_crashed_at_runtime(report: dict[str, Any]) -> bool:
