@@ -198,11 +198,24 @@ def _symbolic_cases(section: dict[str, Any], offset: int) -> tuple[list[dict[str
         verdicts.append(verdict)
         kind = str(c.get("kind") or "rule")
         pattern = str(c.get("pattern") or "")
+        message = str(c.get("message") or "")
+        # The setter's sentence is the label when there is one.
+        #
+        # This label is what the contest room prints on the tab for a broken
+        # rule, and `must_include: \b(std::)?istringstream\b` reached
+        # candidates verbatim -- rendered as "Must use (std::)?istrings...",
+        # and for an alternation the client could not clean, as a bare
+        # "Must not use" that names nothing at all.
+        #
+        # Fixed here rather than in the client on purpose: the proctor bundles
+        # its UI (tauri frontendDist), so a client-side fix reaches nobody who
+        # has already installed it. The worker is deployed, so this reaches
+        # everyone -- including the people who downloaded yesterday.
         cases.append(
             {
                 "kind": "symbolic",
                 "testcase_no": offset + i + 1,
-                "label": f"{kind}: {pattern}"[:64],
+                "label": (message or f"{kind}: {pattern}")[:64],
                 "verdict": verdict,
                 "runtime_ms": 0,
                 "memory_kb": 0,
