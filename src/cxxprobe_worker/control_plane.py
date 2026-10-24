@@ -100,9 +100,11 @@ def _custom_cases(report: dict[str, Any]) -> dict[str, Any]:
                 "kind": "io",
                 "testcase_no": i + 1,
                 "label": str(c.get("label") or f"Case {i + 1}"),
-                # Empty, not "SE": an unjudged case is not a failed one, and
-                # the API keys "was this custom" off stdout being present
-                # rather than off the verdict.
+                # Empty, not "SE": an unjudged case is not a failed one.
+                # (The API used to tell custom runs apart by stdout being
+                # present here and absent above. It no longer does -- it reads
+                # the job it enqueued -- because that made adding output to
+                # ordinary cases leak the hidden ones.)
                 "verdict": verdict,
                 "runtime_ms": int(c.get("wall_time_ms") or c.get("cpu_time_ms") or 0),
                 "memory_kb": int(c.get("peak_memory_bytes") or 0) // 1024,
@@ -149,6 +151,20 @@ def _manual_cases(section: dict[str, Any]) -> tuple[list[dict[str, Any]], list[s
                 "memory_kb": int(c.get("peak_memory_bytes") or 0) // 1024,
                 "exit_code": int(c.get("exit_code") or 0),
                 "checker_message": str(c.get("checker_diagnostics") or ""),
+                # What the program actually printed.
+                #
+                # Omitted here for a long time while `_custom_cases` sent it,
+                # so a candidate running the problem's own samples saw a
+                # verdict and nothing else: of 1,216 submitted I/O cases in
+                # the 24 Oct contest, not one carried any output, and anyone
+                # whose answer was wrong had no way to see how.
+                #
+                # Safe because the API drops every non-sample case before a
+                # candidate sees it, and a sample's input and expected output
+                # are printed in the statement they are already reading. The
+                # only thing missing was their own side of it.
+                "stdout": str(c.get("stdout") or ""),
+                "stderr": str(c.get("stderr") or ""),
             }
         )
     return cases, verdicts
