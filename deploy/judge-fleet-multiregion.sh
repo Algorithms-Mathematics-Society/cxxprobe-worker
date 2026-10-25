@@ -50,11 +50,24 @@ capacity() {
   [ -z "$quota" ] && { echo 0; return; }
   # Leave whatever is already running alone — another workload's instances
   # count against the same quota, and stealing its headroom is not our call.
-  local used
-  used=$(aws ec2 describe-instances --region "$region" \
+  #
+  # Count the vCPUs in use, not the instances. This multiplied the instance
+  # count by two, which is only right if everything running is the size we
+  # launch. The app box is a c6a.2xlarge: eight vCPU by itself, the whole
+  # ap-south-1 quota. The old arithmetic read that as two, reported three
+  # free slots in the home region, and every launch there failed with
+  # VcpuLimitExceeded.
+  local types used=0 t n v
+  types=$(aws ec2 describe-instances --region "$region" \
     --filters "Name=instance-state-name,Values=running,pending" \
-    --query 'length(Reservations[].Instances[])' --output text 2>/dev/null)
-  python3 -c "print(max(0, int((${quota%.*} - 2*${used:-0}) // $VCPU_PER_INSTANCE)))"
+    --query 'Reservations[].Instances[].InstanceType' --output text 2>/dev/null)
+  for t in $(printf '%s' "$types" | tr ' \t' '\n' | sort -u); do
+    n=$(printf '%s' "$types" | tr ' \t' '\n' | grep -cx "$t")
+    v=$(aws ec2 describe-instance-types --region "$region" --instance-types "$t" \
+      --query 'InstanceTypes[0].VCpuInfo.DefaultVCpus' --output text 2>/dev/null)
+    used=$((used + n * ${v:-$VCPU_PER_INSTANCE}))
+  done
+  python3 -c "print(max(0, int((${quota%.*} - ${used:-0}) // $VCPU_PER_INSTANCE)))"
 }
 
 launch_region() {
