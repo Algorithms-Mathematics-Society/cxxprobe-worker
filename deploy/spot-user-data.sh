@@ -18,7 +18,7 @@ set -euxo pipefail
 
 exec > >(tee /var/log/spot-bootstrap.log) 2>&1
 
-CXXPROBE_VERSION="${CXXPROBE_VERSION:-v0.14.0}"
+CXXPROBE_VERSION="${CXXPROBE_VERSION:-v1.0.0}"
 WORKER_REF="${WORKER_REF:-main}"
 REGION=ap-south-1
 
