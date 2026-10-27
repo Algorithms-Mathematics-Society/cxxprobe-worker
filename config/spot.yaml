@@ -54,6 +54,7 @@ queue:
   # Rejudges only get looked at when the live queue is empty, so a bulk
   # rejudge queued during a contest cannot starve the contest itself.
   secondary_queue_url: https://sqs.ap-south-1.amazonaws.com/362249012864/rejudge
+  priority_queue_url: https://sqs.ap-south-1.amazonaws.com/362249012864/submission-submit
   wait_time_seconds: 20
   visibility_timeout_seconds: 900
 
