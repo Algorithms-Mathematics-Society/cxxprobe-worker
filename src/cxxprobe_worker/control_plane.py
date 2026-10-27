@@ -163,8 +163,9 @@ def _manual_cases(section: dict[str, Any]) -> tuple[list[dict[str, Any]], list[s
                 # candidate sees it, and a sample's input and expected output
                 # are printed in the statement they are already reading. The
                 # only thing missing was their own side of it.
-                "stdout": str(c.get("stdout") or ""),
-                "stderr": str(c.get("stderr") or ""),
+                # Older engines omit these fields. Preserve that distinction
+                # from an explicitly empty output emitted by cxxprobe 1.0.0.
+                **{key: str(c[key]) for key in ("stdout", "stderr") if c.get(key) is not None},
             }
         )
     return cases, verdicts

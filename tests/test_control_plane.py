@@ -405,3 +405,32 @@ def test_an_ordinary_report_is_untouched_by_the_custom_branch():
     )
     assert out["verdict"] == "AC"
     assert all("stdout" not in c for c in out["testcases"])
+
+
+def test_ordinary_output_preserves_text_empty_and_absent_values():
+    out = summarise(
+        {
+            "tests": {
+                "manual": {
+                    "cases": [
+                        {
+                            "label": "text",
+                            "verdict": "WA",
+                            "stdout": "actual\n",
+                            "stderr": "diagnostic",
+                        },
+                        {"label": "empty", "verdict": "AC", "stdout": "", "stderr": ""},
+                        {"label": "old-engine", "verdict": "AC"},
+                        {"label": "null", "verdict": "CE", "stdout": None, "stderr": None},
+                    ]
+                }
+            },
+        }
+    )
+    rows = out["testcases"]
+    assert rows[0]["stdout"] == "actual\n"
+    assert rows[0]["stderr"] == "diagnostic"
+    assert rows[1]["stdout"] == rows[1]["stderr"] == ""
+    for row in rows[2:]:
+        assert "stdout" not in row and "stderr" not in row
+    assert out["verdict"] == "CE"
