@@ -44,6 +44,7 @@ class SqsJobQueue:
         wait_time_seconds: int = 20,
         client: Any = None,
         secondary_queue_url: str = "",
+        priority_queue_url: str = "",
     ) -> None:
         self._queue_url = queue_url
         # Polled only when the primary is empty. The rejudge queue is
@@ -51,6 +52,8 @@ class SqsJobQueue:
         # during a contest — but a queue nobody consumes is worse than no
         # queue at all, and rejudged submissions simply sat there for ever.
         self._secondary_queue_url = secondary_queue_url.strip()
+        # Checked before the primary, and *short*-polled: see `claim`.
+        self._priority_queue_url = priority_queue_url.strip()
         # Long-polling: 20s is SQS's maximum and the difference between one
         # API call per job and one every poll interval.
         self._wait_time = wait_time_seconds
@@ -79,18 +82,49 @@ class SqsJobQueue:
             raise QueueError(f"cannot publish job {job.job_id}: {exc}") from exc
 
     def claim(self) -> Lease | None:
-        lease = self._claim_from(self._queue_url)
-        if lease is not None or not self._secondary_queue_url:
-            return lease
-        # Nothing urgent waiting, so catch up on the backlog.
-        return self._claim_from(self._secondary_queue_url)
+        """Take the most important job waiting anywhere, best tier first.
 
-    def _claim_from(self, queue_url: str) -> Lease | None:
+        **Long polling and priority cannot be combined.** SQS has no
+        cross-queue receive, so priority means asking each queue in turn, and
+        a 20s long poll on *any* tier blocks the tiers behind it for 20s. Long
+        poll the submit queue and a lone run waits 20s; long poll the run
+        queue and a submit arriving mid-poll waits 20s. Neither is acceptable,
+        so with a priority queue configured every tier is short-polled and the
+        daemon's own `poll_interval_seconds` does the waiting instead — it
+        already sleeps when `claim` comes back empty.
+
+        That trades long polling's call-saving for responsiveness: three
+        short polls every couple of seconds per idle worker, which is cents
+        per contest, against a tiered queue that actually honours its tiers.
+
+        With no priority queue configured the old behaviour is kept exactly,
+        so turning the fast lane off is a complete rollback.
+        """
+        tiers = [
+            url
+            for url in (self._priority_queue_url, self._queue_url, self._secondary_queue_url)
+            if url
+        ]
+        # Short polls can miss a message that is present, because SQS samples
+        # a subset of its servers. That is survivable here — the next claim a
+        # second or two later picks it up — but it is the reason long polling
+        # stays the default when there is no tiering to honour.
+        wait = 0 if self._priority_queue_url else None
+        for index, url in enumerate(tiers):
+            # Without a priority queue, keep the long poll on the primary and
+            # the short poll on the backlog, exactly as before.
+            tier_wait = wait if wait is not None else (None if index == 0 else 0)
+            lease = self._claim_from(url, wait=tier_wait)
+            if lease is not None:
+                return lease
+        return None
+
+    def _claim_from(self, queue_url: str, *, wait: int | None = None) -> Lease | None:
         try:
             resp = self._sqs.receive_message(
                 QueueUrl=queue_url,
                 MaxNumberOfMessages=1,
-                WaitTimeSeconds=self._wait_time,
+                WaitTimeSeconds=self._wait_time if wait is None else wait,
                 AttributeNames=["ApproximateReceiveCount"],
             )
         except Exception as exc:

@@ -239,6 +239,7 @@ def build_queue(
     region: str | None = None,
     wait_time_seconds: int = 20,
     secondary_queue_url: str = "",
+    priority_queue_url: str = "",
 ) -> IJobQueue:
     if backend == "local":
         return LocalJobQueue(root, visibility_timeout_seconds, max_delivery_attempts)
@@ -252,5 +253,6 @@ def build_queue(
             region=region,
             wait_time_seconds=wait_time_seconds,
             secondary_queue_url=secondary_queue_url,
+            priority_queue_url=priority_queue_url,
         )
     raise ValueError(f"unknown queue backend: {backend!r}")

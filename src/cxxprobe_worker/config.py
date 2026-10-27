@@ -98,6 +98,18 @@ class QueueConfig(BaseModel):
     root: Path = Path("/var/lib/cxxprobe-worker/queue")
     """Local backend only."""
 
+    # Looked at before anything else, and with a *short* poll so an empty
+    # one costs nothing. This is where scored submissions land.
+    #
+    # Candidates iterate on Run until their code passes and then submit, so
+    # runs are roughly 85% of all jobs while a submit is the only thing that
+    # scores. Served in arrival order, a submit queues behind every run in
+    # front of it — which is worst in the closing minutes, when the hall is
+    # both mashing Run and submitting. Giving the 15% strict priority costs
+    # the 85% almost nothing and keeps a verdict that counts seconds away.
+    #
+    # Empty disables it entirely and the worker behaves exactly as before.
+    priority_queue_url: str = ""
     queue_url: str = ""
     # Polled only when `queue_url` is empty, so a backlog never delays live
     # work. This is where rejudges land.

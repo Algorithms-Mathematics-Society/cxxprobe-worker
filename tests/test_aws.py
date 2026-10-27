@@ -8,6 +8,7 @@ filesystem backends — rather than re-testing boto3.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import boto3
@@ -352,3 +353,80 @@ def test_a_lease_is_completed_against_the_queue_it_came_from(sqs_queue):
 
     queue.complete(lease)
     assert queue.claim() is None, "the message must actually be gone"
+
+
+def test_a_submit_is_claimed_before_an_older_run(sqs_queue):
+    """Submits jump the queue, because they are the only thing that scores.
+
+    Candidates iterate on Run until their code passes and then submit, so
+    runs are roughly 85% of all jobs. Served in arrival order a submit waits
+    behind every run ahead of it, and that is worst in the closing minutes
+    when the hall is both mashing Run and submitting.
+    """
+    _, client = sqs_queue
+    priority_url = client.create_queue(QueueName="test-submits")["QueueUrl"]
+    primary_url = client.create_queue(QueueName="test-runs")["QueueUrl"]
+
+    queue = SqsJobQueue(
+        primary_url,
+        wait_time_seconds=0,
+        client=client,
+        priority_queue_url=priority_url,
+    )
+
+    # The run is sent *first*, so arrival order alone would serve it first.
+    client.send_message(QueueUrl=primary_url, MessageBody=make_job("run").model_dump_json())
+    client.send_message(QueueUrl=priority_url, MessageBody=make_job("submit").model_dump_json())
+
+    first = queue.claim()
+    assert first is not None
+    assert first.job.job_id == "submit", "the scored attempt must not wait behind a run"
+    queue.complete(first)
+
+    second = queue.claim()
+    assert second is not None
+    assert second.job.job_id == "run", "and the run is still served, right after"
+
+
+def test_an_empty_submit_queue_does_not_stall_the_run_queue(sqs_queue):
+    """The trap this design has to avoid.
+
+    SQS has no cross-queue receive, so priority means polling in turn. A 20s
+    long poll on the submit queue — which is empty most of the time, being
+    15% of the traffic — would block every claim for 20s while runs sat
+    waiting behind it, costing almost all of the fleet's throughput.
+    """
+    _, client = sqs_queue
+    priority_url = client.create_queue(QueueName="test-submits-empty")["QueueUrl"]
+    primary_url = client.create_queue(QueueName="test-runs-busy")["QueueUrl"]
+
+    # A long wait is configured deliberately: if any tier honoured it, this
+    # test would take 20s rather than returning at once.
+    queue = SqsJobQueue(
+        primary_url,
+        wait_time_seconds=20,
+        client=client,
+        priority_queue_url=priority_url,
+    )
+    client.send_message(QueueUrl=primary_url, MessageBody=make_job("run").model_dump_json())
+
+    started = time.monotonic()
+    lease = queue.claim()
+    elapsed = time.monotonic() - started
+
+    assert lease is not None
+    assert lease.job.job_id == "run"
+    assert elapsed < 5, f"claim took {elapsed:.1f}s — a tier is long-polling"
+
+
+def test_without_a_priority_queue_nothing_changes(sqs_queue):
+    """Turning the fast lane off has to be a complete rollback."""
+    _, client = sqs_queue
+    primary_url = client.create_queue(QueueName="test-rollback")["QueueUrl"]
+    queue = SqsJobQueue(primary_url, wait_time_seconds=0, client=client)
+
+    client.send_message(QueueUrl=primary_url, MessageBody=make_job("only").model_dump_json())
+    lease = queue.claim()
+    assert lease is not None
+    assert lease.job.job_id == "only"
+    assert queue.claim() is None
