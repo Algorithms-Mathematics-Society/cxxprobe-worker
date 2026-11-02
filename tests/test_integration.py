@@ -115,6 +115,7 @@ def test_wrong_solution_is_still_a_successful_job(real_problem: Path, tmp_path: 
     # exit 1 from cxxprobe — a real WA — must not be mistaken for a job failure.
     assert result.status is JobStatus.SUCCEEDED, result.error
     assert result.report is not None
+    assert result.report["slug"] == "sum-two"
     assert result.report["overall"] == "FAIL"
     assert result.should_retry is False
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from cxxprobe_worker.config import JudgeConfig
-from cxxprobe_worker.executor import JobExecutor
+from cxxprobe_worker.executor import JobExecutor, PreparationError, _stage_inputs
 from cxxprobe_worker.jobs import Job, JobStatus
 from cxxprobe_worker.storage import FilesystemArtifactStorage
 from cxxprobe_worker.workspace import WorkspaceManager
@@ -524,3 +526,43 @@ def test_empty_custom_cases_is_refused_rather_than_judged_normally(
     assert result.status is JobStatus.FAILED
     assert result.error is not None
     assert "empty" in result.error
+
+
+@pytest.mark.parametrize("location", ["absolute", "dot", "parent"])
+def test_directory_staging_preserves_basename_and_isolation(
+    tmp_path, workspaces, monkeypatch, location: str
+):
+    package, submission = make_inputs(tmp_path)
+    package = package.rename(tmp_path / "sum-two")
+    original_yaml = (package / "problem.yaml").read_bytes()
+    if location == "dot":
+        monkeypatch.chdir(package)
+        source = "."
+    elif location == "parent":
+        child = package / "child"
+        child.mkdir()
+        monkeypatch.chdir(child)
+        source = ".."
+    else:
+        source = str(package)
+    workspace = workspaces.create("staging-test")
+    flag, staged = _stage_inputs(
+        Job(job_id="staging-test", package_path=source, submission_path=str(submission)),
+        workspace,
+    )
+    assert flag == "--problem-dir"
+    assert staged == workspace.package_dir / "sum-two"
+    assert staged.resolve().is_relative_to(workspace.root.resolve())
+    assert (staged / "problem.yaml").read_bytes() == original_yaml
+    (staged / "problem.yaml").write_text("private workspace change")
+    assert (package / "problem.yaml").read_bytes() == original_yaml
+
+
+def test_directory_without_basename_is_rejected_before_copying(tmp_path, workspaces):
+    _, submission = make_inputs(tmp_path)
+    workspace = workspaces.create("root-test")
+    with pytest.raises(PreparationError, match="basename"):
+        _stage_inputs(
+            Job(job_id="root-test", package_path=tmp_path.anchor, submission_path=str(submission)),
+            workspace,
+        )

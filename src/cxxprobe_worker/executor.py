@@ -228,7 +228,12 @@ def _stage_inputs(
         return "--package", staged
 
     if package.is_dir():
-        staged = workspace.package_dir
+        # cxxprobe derives the slug from this directory name. Resolve dot/parent
+        # paths before taking the basename so staging stays inside the workspace.
+        package = package.resolve()
+        if not package.name:
+            raise PreparationError("problem directory has no usable basename")
+        staged = workspace.package_dir / package.name
         try:
             shutil.copytree(package, staged, dirs_exist_ok=True)
         except OSError as exc:
