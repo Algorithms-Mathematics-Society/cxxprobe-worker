@@ -12,7 +12,9 @@ a new file rather than a refactor.
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -33,6 +35,10 @@ class IArtifactStorage(Protocol):
     def put_bytes(self, job_id: str, name: str, data: bytes) -> str:
         """Store ``data`` and return a backend-specific locator (path, URL, …)."""
         ...
+
+    def put_immutable(self, job_id: str, name: str, data: bytes) -> str: ...
+
+    def list_prefix(self, job_id: str, prefix: str, limit: int) -> list[str]: ...
 
     def put_text(self, job_id: str, name: str, text: str) -> str: ...
 
@@ -59,6 +65,39 @@ def _validate_name(name: str) -> None:
         raise StorageError(f"artifact name must be relative: {name!r}")
     if ".." in Path(name).parts:
         raise StorageError(f"artifact name must not traverse upwards: {name!r}")
+
+
+def durable_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
+    """Publish only complete bytes; fsync data and directory entries before success.
+
+    An exclusive hard link makes immutable creation atomic without overwriting
+    another writer. The temporary file is on the same filesystem.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if exclusive:
+            try:
+                os.link(temporary_path, path)
+            except FileExistsError:
+                if path.read_bytes() != data:
+                    raise StorageError(f"immutable artifact already exists: {path}") from None
+        else:
+            temporary_path.replace(path)
+        # New nested directories must survive a power loss as well as the file.
+        for directory in (path.parent, *path.parent.parents):
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 class FilesystemArtifactStorage:
@@ -89,6 +128,31 @@ class FilesystemArtifactStorage:
         except OSError as exc:
             raise StorageError(f"cannot write artifact {job_id}/{name}: {exc}") from exc
         return str(path)
+
+    def put_immutable(self, job_id: str, name: str, data: bytes) -> str:
+        path = self._path_for(job_id, name)
+        try:
+            durable_write(path, data, exclusive=True)
+        except OSError as exc:
+            raise StorageError(f"cannot persist {job_id}/{name}: {exc}") from exc
+        return str(path)
+
+    def list_prefix(self, job_id: str, prefix: str, limit: int) -> list[str]:
+        """Read at most limit+1 entries in one attempt directory; never walk a job."""
+        base = self._path_for(job_id, prefix)
+        names: list[str] = []
+        try:
+            with os.scandir(base) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name.endswith(".json"):
+                        names.append(f"{prefix.rstrip('/')}/{entry.name}")
+                    if len(names) > limit:
+                        raise StorageError(f"result lookup limit exceeded for {job_id}/{prefix}")
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            raise StorageError(f"cannot list {job_id}/{prefix}: {exc}") from exc
+        return sorted(names)
 
     def put_text(self, job_id: str, name: str, text: str) -> str:
         return self.put_bytes(job_id, name, text.encode())

@@ -64,6 +64,10 @@ class IControlPlane(Protocol):
 
     def publish_result(self, result: JobResult) -> bool: ...
 
+    def result_payload(self, result: JobResult) -> dict[str, Any]: ...
+
+    def publish_payload(self, payload: dict[str, Any]) -> bool: ...
+
 
 class ControlPlaneError(RuntimeError):
     pass
@@ -436,25 +440,35 @@ class ControlPlaneClient:
         if not self.enabled:
             return True
 
-        summary = summarise(result.report, result.error or "")
         if result.status is JobStatus.RETRYABLE:
-            # Nothing to report: the job did not produce a verdict and will
-            # be redelivered.
             return True
+        return self.publish_payload(self.result_payload(result))
 
+    def result_payload(self, result: JobResult) -> dict[str, Any]:
+        """Freeze the entire HTTP callback before its first delivery."""
         payload = {
             "job_uid": result.job_id,
             "worker_uid": self._worker_uid,
-            **summary,
+            **summarise(result.report, result.error or ""),
         }
+        if result.attempt_token is not None:
+            payload["attempt_token"] = result.attempt_token
+        return payload
+
+    def publish_payload(self, payload: dict[str, Any]) -> bool:
+        """Replay an already prepared callback without changing its identity."""
+        if not self.enabled:
+            return True
         try:
             resp = self._http().post("/workers/result", json=payload)
             resp.raise_for_status()
         except Exception as exc:
-            self._log.error("control_plane.result_failed", job_id=result.job_id, error=str(exc))
+            self._log.error(
+                "control_plane.result_failed", job_id=payload["job_uid"], error=str(exc)
+            )
             return False
         self._log.info(
-            "control_plane.result_sent", job_id=result.job_id, verdict=summary["verdict"]
+            "control_plane.result_sent", job_id=payload["job_uid"], verdict=payload["verdict"]
         )
         return True
 

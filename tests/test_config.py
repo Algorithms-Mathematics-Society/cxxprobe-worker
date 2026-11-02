@@ -133,3 +133,23 @@ def test_typed_overrides_still_parse_as_yaml(tmp_path):
     )
     assert config.concurrency == 6
     assert config.workspace.keep_on_failure is True
+
+
+@pytest.mark.parametrize("tier", ["main", "priority", "backlog"])
+def test_dead_letter_queue_must_be_distinct_after_url_normalization(tier: str):
+    from pydantic import ValidationError
+
+    from cxxprobe_worker.config import QueueConfig
+
+    with pytest.raises(ValidationError, match="differ"):
+        QueueConfig(
+            backend="sqs",
+            queue_url=" main/ ",
+            priority_queue_url="priority",
+            secondary_queue_url="backlog",
+            dead_letter_queue_url=f" {tier}/ ",
+        )
+
+
+def test_result_production_defaults_off():
+    assert WorkerConfig().result_delivery_enabled is False

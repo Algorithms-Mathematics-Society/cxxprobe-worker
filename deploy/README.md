@@ -121,3 +121,24 @@ Prerequisite that does exist: IAM role `ams-worker-role` + instance profile
 If the account ever leaves the Free Tier plan, `judge-fleet.sh` and the
 single-region ASG become the better option — fewer moving parts and no
 cross-region penalty — and need a Spot vCPU quota increase to ~64.
+
+## Enabling durable result delivery
+
+Roll out the token-capable API and this worker to every queue reader and Spot
+launch template before enabling `result_delivery_enabled` (default false). Use
+S3 artifacts for Spot: local filesystem replay only survives on the same host.
+
+Set `queue.dead_letter_queue_url` to an existing DLQ distinct from all polled
+tiers. Grant worker roles `sqs:SendMessage` on priority, primary, backlog, and
+DLQ queues, and `s3:PutObject`/`s3:GetObject` on the artifact prefix plus scoped
+`s3:ListBucket`. The SDK must support conditional `PutObject.IfNoneMatch`. This
+patch does not provision infrastructure or change fleet settings.
+
+Retain artifacts and DLQ messages past the retry deadline plus the on-call
+response window. Alert on `result.recovery_required`; its exact job/artifact key
+can be passed to `recover-result --dry-run`, then explicitly `--enqueue`. See
+the [worker recovery guide](../README.md#durable-callback-delivery-opt-in).
+
+Disabling production stops new saved callbacks but keeps existing marker and
+cached-source replay readers active. Keep the API token protocol, upgraded
+readers, storage permissions, and queue/DLQ send permissions during rollback.

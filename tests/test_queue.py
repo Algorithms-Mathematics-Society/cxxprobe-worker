@@ -189,3 +189,26 @@ def test_completing_a_job_stops_the_attempt_count_growing(tmp_path: Path):
     q.complete(lease)
     assert q.dead_letter_count() == 0
     assert q.depth() == 0
+
+
+def test_delayed_local_publication_survives_new_queue_instance(tmp_path, monkeypatch):
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    queue = LocalJobQueue(tmp_path / "queue")
+    queue.publish(make_job(), delay_seconds=7)
+    restarted = LocalJobQueue(tmp_path / "queue")
+    assert restarted.claim() is None
+    clock[0] += 8
+    assert restarted.claim() is not None
+
+
+def test_unacknowledged_local_receives_keep_counting_after_restart(tmp_path, monkeypatch):
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    queue = LocalJobQueue(tmp_path / "queue", visibility_timeout_seconds=1)
+    queue.publish(make_job())
+    first = queue.claim()
+    assert first is not None and first.delivery_attempt == 1
+    clock[0] += 2
+    second = LocalJobQueue(tmp_path / "queue", visibility_timeout_seconds=1).claim()
+    assert second is not None and second.delivery_attempt == 2

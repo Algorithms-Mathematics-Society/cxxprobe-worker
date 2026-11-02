@@ -18,13 +18,17 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import FrameType
 
+from pydantic import ValidationError
+
 from cxxprobe_worker import __version__
 from cxxprobe_worker.config import WorkerConfig
 from cxxprobe_worker.control_plane import IControlPlane
+from cxxprobe_worker.delivery import DeliveryState, ResultDelivery
 from cxxprobe_worker.executor import JobExecutor
 from cxxprobe_worker.jobs import JobResult, JobStatus
 from cxxprobe_worker.monitoring import HealthReporter, Logger, Metrics
 from cxxprobe_worker.queue import IJobQueue, Lease, QueueError
+from cxxprobe_worker.storage import IArtifactStorage, StorageError
 
 
 class Worker:
@@ -39,6 +43,7 @@ class Worker:
         metrics: Metrics,
         health: HealthReporter,
         control_plane: IControlPlane | None = None,
+        storage: IArtifactStorage | None = None,
     ) -> None:
         self._config = config
         self._queue = queue
@@ -47,6 +52,13 @@ class Worker:
         self._metrics = metrics
         self._health = health
         self._control_plane = control_plane
+        self._delivery = (
+            ResultDelivery(config, storage, queue, control_plane, logger)
+            if storage is not None and control_plane is not None
+            else None
+        )
+        if config.result_delivery_enabled and self._delivery is None:
+            raise ValueError("durable result delivery requires storage and a control plane")
         self._stopping = threading.Event()
         self._jobs_claimed = 0
         # Monotonic; -inf so the first check-in always fires.
@@ -141,15 +153,75 @@ class Worker:
             # and it will be redone — at-least-once is the contract.
             self._log.error("queue.finalize_failed", job_id=result.job_id, error=str(exc))
 
+    def _process_lease(self, lease: Lease) -> JobResult | None:
+        delivery = self._delivery
+        plane = self._control_plane
+        marker = "delivery" in lease.job.metadata
+        readable = (
+            delivery is not None
+            and plane is not None
+            and plane.enabled
+            and lease.job.attempt_token is not None
+        )
+        produce = self._config.result_delivery_enabled and readable
+        # This guard is unconditional: rollback/malformed markers must never
+        # accidentally enter the executor or be acknowledged.
+        if marker and (not readable or delivery is None):
+            self._log.error("result.delivery_disabled", job_id=lease.job.job_id)
+            return None
+        try:
+            if marker and delivery is not None:
+                state = DeliveryState.model_validate(lease.job.metadata["delivery"])
+                envelope = delivery.load(lease.job, state.artifact)
+                return delivery.deliver(lease, state.artifact, envelope)
+            if readable and delivery is not None:
+                cached = delivery.find(lease.job)
+                if cached is not None:
+                    return delivery.deliver(lease, *cached)
+
+            result = self._executor.execute(lease.job).model_copy(
+                update={"attempt_token": lease.job.attempt_token}
+            )
+            result = self._give_up_if_last_delivery(lease, result)
+            if produce and delivery is not None and not result.should_retry:
+                artifact, envelope = delivery.persist(lease, result)
+                delivery.deliver(lease, artifact, envelope)
+                return result
+            self._handle_result(lease, result)
+        except (StorageError, QueueError, ValidationError) as exc:
+            # No acknowledgement or immediate release. Visibility/redrive is
+            # the backstop; an absent/unreadable envelope must never cause judging.
+            self._log.error(
+                "result.delivery_failed",
+                job_id=lease.job.job_id,
+                attempt_token=lease.job.attempt_token,
+                error=str(exc),
+            )
+            if lease.delivery_attempt >= self._config.queue.max_delivery_attempts:
+                self._log.error(
+                    "result.recovery_required",
+                    job_id=lease.job.job_id,
+                    attempt_token=lease.job.attempt_token,
+                    delivery=lease.job.metadata.get("delivery"),
+                    error=str(exc),
+                )
+            return None
+        else:
+            return result
+
     def _run_one(self, lease: Lease) -> None:
         try:
-            result = self._executor.execute(lease.job)
+            self._process_lease(lease)
         except Exception as exc:  # a job must never take the worker down
             self._log.error("job.crashed", job_id=lease.job.job_id, error=str(exc))
-            self._queue.release(lease)
+            # A result-only message is never sent back into execution.
+            try:
+                self._queue.release(lease)
+            except QueueError as queue_exc:
+                self._log.error(
+                    "queue.finalize_failed", job_id=lease.job.job_id, error=str(queue_exc)
+                )
             self._metrics.incr("jobs_crashed")
-            return
-        self._handle_result(lease, result)
 
     def _check_in(self, running_jobs: int, *, force: bool = False) -> None:
         """Tell the control plane this worker is alive, at most every interval.
@@ -238,9 +310,7 @@ class Worker:
             return None
 
         self._metrics.incr("jobs_claimed")
-        result = self._executor.execute(lease.job)
-        self._handle_result(lease, result)
-        return result
+        return self._process_lease(lease)
 
     def _sleep_between_polls(self) -> None:
         # Waiting on the stop event rather than sleeping flat means SIGTERM

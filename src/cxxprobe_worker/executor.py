@@ -295,7 +295,7 @@ class JobExecutor:
             duration_seconds=round(result.duration_seconds, 3),
             error=result.error,
         )
-        return result
+        return result.model_copy(update={"attempt_token": job.attempt_token})
 
     def _run_in_workspace(self, job: Job, workspace: Workspace, started: float) -> JobResult:
         package_flag, package_path = _stage_inputs(job, workspace, self._fetcher, self._packages)
