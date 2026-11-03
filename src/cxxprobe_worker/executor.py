@@ -228,8 +228,11 @@ def _stage_inputs(
         return "--package", staged
 
     if package.is_dir():
-        staged = workspace.package_dir
+        # Under its own basename, not a fixed one: cxxprobe takes the slug from
+        # this directory's name. See Workspace.staged_package_dir.
+        staged = workspace.staged_package_dir(package)
         try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(package, staged, dirs_exist_ok=True)
         except OSError as exc:
             raise PreparationError(f"cannot stage package directory: {exc}") from exc

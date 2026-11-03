@@ -55,3 +55,36 @@ def test_paths_are_under_the_workspace_root(workspaces: WorkspaceManager):
     assert ws.submission_path.parent == ws.root
     assert ws.report_path.parent == ws.root
     assert ws.package_dir.parent == ws.root
+
+
+def test_staged_package_dir_keeps_the_source_basename(workspaces: WorkspaceManager):
+    ws = workspaces.create("job-1")
+    staged = ws.staged_package_dir(Path("/contests/round-1/sum-two"))
+    # cxxprobe reads the slug off this basename, so it has to be the problem's
+    # name and not the workspace's idea of where packages go.
+    assert staged.name == "sum-two"
+    assert staged.parent == ws.package_dir
+
+
+def test_staged_package_dir_accepts_a_plain_string(workspaces: WorkspaceManager):
+    ws = workspaces.create("job-1")
+    assert ws.staged_package_dir("sum-two").name == "sum-two"
+
+
+def test_staged_package_dir_resolves_a_dot_path(
+    workspaces: WorkspaceManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    problem = tmp_path / "exact-thirds"
+    problem.mkdir()
+    monkeypatch.chdir(problem)
+    ws = workspaces.create("job-1")
+    # Path() is the current directory, which has a real name even though the
+    # path itself carries no basename. Falling back to "package" here would
+    # throw away a slug the filesystem can still supply.
+    assert ws.staged_package_dir(Path()).name == "exact-thirds"
+
+
+def test_staged_package_dir_falls_back_when_there_is_no_name(workspaces: WorkspaceManager):
+    ws = workspaces.create("job-1")
+    # A root path has no basename to preserve. A dull slug beats an exception.
+    assert ws.staged_package_dir(Path("/")).name == "package"

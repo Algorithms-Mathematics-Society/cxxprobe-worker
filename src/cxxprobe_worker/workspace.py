@@ -35,6 +35,30 @@ class Workspace:
         """Where the problem package is unpacked."""
         return self.root / "package"
 
+    def staged_package_dir(self, source: Path | str) -> Path:
+        """Where a directory package is unpacked, under its own name.
+
+        cxxprobe derives a problem's slug from the basename of the directory it
+        is handed -- ``cfg.slug = cfg.problem_dir.filename()`` in
+        ``src/problem/problem.cpp`` -- so copying every directory package to a
+        fixed ``package/`` reported every one of them under the slug
+        ``package``, whatever the problem was actually called. The verdict was
+        right and unattributable, and zip packages did not share the bug
+        because cxxprobe unpacks those itself.
+
+        Nesting the package under its original basename preserves the identity
+        the slug is taken from, and keeps it inside ``package/`` where cleanup
+        already covers it.
+        """
+        candidate = Path(source)
+        name = candidate.name
+        if name in ("", ".", ".."):
+            # "." and "pkg/." still name a real directory; ask the filesystem.
+            name = candidate.resolve().name
+        if not name:
+            name = "package"
+        return self.package_dir / name
+
     @property
     def submission_path(self) -> Path:
         """The source file handed to `cxxprobe judge --submission`."""

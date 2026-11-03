@@ -233,6 +233,43 @@ def test_directory_package_is_passed_with_the_problem_dir_flag(
     assert "--problem-dir" in result.report["argv"]
 
 
+def test_directory_package_is_staged_under_its_own_name(tmp_path, workspaces, storage, logger):
+    """The slug cxxprobe reports comes from the staged directory's basename.
+
+    Staging to a fixed ``package/`` made every directory job report the slug
+    ``package``, so a correct verdict could not be attributed to the problem it
+    belonged to. Zip packages never had the bug, which is why it went unnoticed.
+    """
+    package = tmp_path / "exact-thirds"
+    package.mkdir()
+    (package / "problem.yaml").write_text("version: 2\nname: B\n")
+    submission = tmp_path / "sub.cpp"
+    submission.write_text("int main(){}\n")
+
+    recorder = tmp_path / "recorder"
+    recorder.write_text(
+        "#!/bin/sh\n"
+        'out=""; prev=""; dir=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--output" ]; then out="$a"; fi\n'
+        '  if [ "$prev" = "--problem-dir" ]; then dir="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'printf \'{"problem_dir": "%s"}\' "$dir" > "$out"\n'
+        "exit 0\n"
+    )
+    recorder.chmod(0o755)
+    executor = build_executor(recorder, workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
+    assert result.status is JobStatus.SUCCEEDED
+    assert result.report is not None
+    staged = Path(result.report["problem_dir"])
+    assert staged.name == "exact-thirds", "slug source must survive staging"
+
+
 def test_artifacts_are_persisted_for_a_successful_job(
     tmp_path, fake_cxxprobe, workspaces, storage, logger
 ):
