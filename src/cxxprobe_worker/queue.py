@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from cxxprobe_worker.jobs import Job, JobError
+from cxxprobe_worker.storage import durable_write
 
 
 class QueueError(RuntimeError):
@@ -63,7 +64,9 @@ class IJobQueue(Protocol):
         """Return a job for redelivery."""
         ...
 
-    def publish(self, job: Job) -> None:
+    def publish(
+        self, job: Job, *, target_tier: str = "", delay_seconds: int = 0, dead_letter: bool = False
+    ) -> None:
         """Enqueue a job. Mainly for tests and the `submit` CLI verb."""
         ...
 
@@ -105,14 +108,16 @@ class LocalJobQueue:
         except OSError as exc:
             raise QueueError(f"cannot create queue directories under {self._root}: {exc}") from exc
 
-    def publish(self, job: Job) -> None:
-        self._ensure_dirs()
-        # uuid suffix so republishing the same job_id (a retry) doesn't
-        # overwrite the copy already waiting.
-        name = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}-{job.job_id}.json"
-        path = self._pending / name
+    def publish(
+        self, job: Job, *, target_tier: str = "", delay_seconds: int = 0, dead_letter: bool = False
+    ) -> None:
+        if target_tier not in {"", "local"} or not 0 <= delay_seconds <= 900:
+            raise QueueError("invalid local queue tier or delay")
+        directory = self._root / "dead" if dead_letter else self._pending
+        # Never put an untrusted job_id in a filename. Due time also survives restart.
+        name = f"{int((time.time() + delay_seconds) * 1000)}-{uuid.uuid4().hex}.json"
         try:
-            path.write_text(job.model_dump_json(indent=2))
+            durable_write(directory / name, job.model_dump_json().encode())
         except OSError as exc:
             raise QueueError(f"cannot publish job {job.job_id}: {exc}") from exc
 
@@ -121,6 +126,9 @@ class LocalJobQueue:
         self._reclaim_expired()
 
         for candidate in sorted(self._pending.glob("*.json")):
+            due, _, _ = candidate.name.partition("-")
+            if due.isdigit() and int(due) > int(time.time() * 1000):
+                continue
             target = self._inflight / candidate.name
             try:
                 candidate.rename(target)
@@ -147,7 +155,15 @@ class LocalJobQueue:
                 self._quarantine(target)
                 continue
 
-            return Lease(job=job, receipt=target.name, delivery_attempt=attempt)
+            # Persist receives, not only explicit releases, so a crashed or
+            # unacknowledged delivery cannot reset its budget after restart.
+            counted = target.with_name(_with_attempts(target.name, attempt))
+            try:
+                target.rename(counted)
+                counted.touch()  # visibility starts at claim, not publication
+            except OSError as exc:
+                raise QueueError(f"cannot record receive for {job.job_id}: {exc}") from exc
+            return Lease(job=job, receipt=counted.name, delivery_attempt=attempt)
         return None
 
     def complete(self, lease: Lease) -> None:
@@ -204,8 +220,8 @@ class LocalJobQueue:
         try:
             dead.mkdir(parents=True, exist_ok=True)
             path.rename(dead / path.name)
-        except OSError:
-            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise QueueError(f"cannot dead-letter {path.name}: {exc}") from exc
 
 
 # Delivery count is carried in the filename (``...#3.json``) rather than in
@@ -240,6 +256,7 @@ def build_queue(
     wait_time_seconds: int = 20,
     secondary_queue_url: str = "",
     priority_queue_url: str = "",
+    dead_letter_queue_url: str = "",
 ) -> IJobQueue:
     if backend == "local":
         return LocalJobQueue(root, visibility_timeout_seconds, max_delivery_attempts)
@@ -254,5 +271,6 @@ def build_queue(
             wait_time_seconds=wait_time_seconds,
             secondary_queue_url=secondary_queue_url,
             priority_queue_url=priority_queue_url,
+            dead_letter_queue_url=dead_letter_queue_url,
         )
     raise ValueError(f"unknown queue backend: {backend!r}")

@@ -108,6 +108,37 @@ def submit(
     typer.echo(f"queued {job.job_id}")
 
 
+@app.command("recover-result")
+def recover_result(
+    job_id: Annotated[str, typer.Option("--job-id", help="Exact job artifact namespace")],
+    artifact: Annotated[
+        str, typer.Option("--artifact", help="Exact results/<attempt>/<execution>.json key")
+    ],
+    dry_run: Annotated[bool, typer.Option("--dry-run/--enqueue")] = True,
+    env: EnvOption = "test",
+    config_dir: ConfigDirOption = Path("config"),
+) -> None:
+    """Inspect one saved callback; --enqueue starts one bounded replay window."""
+    from cxxprobe_worker.delivery import ResultDelivery
+    from cxxprobe_worker.queue import QueueError
+    from cxxprobe_worker.storage import StorageError
+
+    application = build_application(_load(env, config_dir))
+    delivery = ResultDelivery(
+        application.config,
+        application.storage,
+        application.queue,
+        application.control_plane,
+        application.logger,
+    )
+    try:
+        payload = delivery.recover(job_id, artifact, dry_run=dry_run)
+    except (StorageError, QueueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(payload, indent=2))
+
+
 @app.command()
 def status(
     env: EnvOption = "test",

@@ -82,3 +82,21 @@ def test_build_storage_requires_a_bucket_for_s3(tmp_path: Path):
     # artifact write, halfway through a contest.
     with pytest.raises(ValueError, match=r"storage\.bucket is required"):
         build_storage("s3", tmp_path, bucket="")
+
+
+def test_immutable_write_rejects_changed_content(storage):
+    storage.put_immutable("j", "results/a.json", b"original")
+    with pytest.raises(StorageError, match="immutable"):
+        storage.put_immutable("j", "results/a.json", b"changed")
+    assert storage.get_bytes("j", "results/a.json") == b"original"
+
+
+def test_immutable_write_fsync_failure_never_publishes_incomplete_bytes(storage, monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        "cxxprobe_worker.storage.os.fsync", Mock(side_effect=OSError("disk failed"))
+    )
+    with pytest.raises(StorageError):
+        storage.put_immutable("j", "results/a.json", b"incomplete")
+    assert not storage.exists("j", "results/a.json")

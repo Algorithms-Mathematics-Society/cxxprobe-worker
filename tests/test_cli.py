@@ -128,3 +128,71 @@ def test_doctor_passes_with_a_present_binary(config_dir: Path):
     result = runner.invoke(app, ["doctor", "--config-dir", str(config_dir)])
     assert result.exit_code == 0, result.stdout
     assert "OK" in result.stdout
+
+
+def test_recover_result_dry_run_and_explicit_enqueue(config_dir: Path):
+    from uuid import uuid4
+
+    from cxxprobe_worker.app import build_application
+    from cxxprobe_worker.config import load_config
+    from cxxprobe_worker.delivery import ResultDelivery
+    from cxxprobe_worker.jobs import Job, JobResult, JobStatus
+    from cxxprobe_worker.queue import Lease
+
+    path = config_dir / "test.yaml"
+    path.write_text(path.read_text() + "control_plane:\n  base_url: https://api.example.test\n")
+    application = build_application(load_config(config_dir=config_dir, environ={}))
+    job = Job(
+        job_id="j", package_path="p", submission_path="s", metadata={"attempt_token": str(uuid4())}
+    )
+    delivery = ResultDelivery(
+        application.config,
+        application.storage,
+        application.queue,
+        application.control_plane,
+        application.logger,
+    )
+    artifact, _ = delivery.persist(
+        Lease(job, "receipt"),
+        JobResult(
+            job_id="j",
+            status=JobStatus.FAILED,
+            error="early failure",
+            attempt_token=job.attempt_token,
+        ),
+    )
+    command = [
+        "recover-result",
+        "--config-dir",
+        str(config_dir),
+        "--job-id",
+        "j",
+        "--artifact",
+        artifact,
+    ]
+    result = runner.invoke(app, command)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["dry_run"] is True
+    assert application.queue.depth() == 0
+    result = runner.invoke(app, [*command, "--enqueue"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["dry_run"] is False
+    assert application.queue.depth() == 1
+    marker = application.queue.claim()
+    assert marker is not None and marker.job.metadata["delivery"]["artifact"] == artifact
+
+
+def test_recovery_rejects_wrong_explicit_artifact(config_dir: Path):
+    result = runner.invoke(
+        app,
+        [
+            "recover-result",
+            "--config-dir",
+            str(config_dir),
+            "--job-id",
+            "j",
+            "--artifact",
+            "../escape",
+        ],
+    )
+    assert result.exit_code == 1

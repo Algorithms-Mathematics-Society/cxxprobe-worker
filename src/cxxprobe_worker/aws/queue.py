@@ -45,18 +45,26 @@ class SqsJobQueue:
         client: Any = None,
         secondary_queue_url: str = "",
         priority_queue_url: str = "",
+        dead_letter_queue_url: str = "",
     ) -> None:
-        self._queue_url = queue_url
+        self._queue_url = queue_url.strip().rstrip("/")
+        self._dead_letter_queue_url = dead_letter_queue_url.strip().rstrip("/")
         # Polled only when the primary is empty. The rejudge queue is
         # separate precisely so a bulk re-run cannot starve live submissions
         # during a contest — but a queue nobody consumes is worse than no
         # queue at all, and rejudged submissions simply sat there for ever.
-        self._secondary_queue_url = secondary_queue_url.strip()
+        self._secondary_queue_url = secondary_queue_url.strip().rstrip("/")
         # Checked before the primary, and *short*-polled: see `claim`.
-        self._priority_queue_url = priority_queue_url.strip()
+        self._priority_queue_url = priority_queue_url.strip().rstrip("/")
         # Long-polling: 20s is SQS's maximum and the difference between one
         # API call per job and one every poll interval.
         self._wait_time = wait_time_seconds
+        if self._dead_letter_queue_url and self._dead_letter_queue_url in {
+            self._queue_url,
+            self._priority_queue_url,
+            self._secondary_queue_url,
+        }:
+            raise QueueError("dead-letter queue must differ from every polled queue tier")
         if client is not None:
             self._sqs: SQSClient = client
         else:
@@ -72,11 +80,23 @@ class SqsJobQueue:
     def queue_url(self) -> str:
         return self._queue_url
 
-    def publish(self, job: Job) -> None:
+    def publish(
+        self, job: Job, *, target_tier: str = "", delay_seconds: int = 0, dead_letter: bool = False
+    ) -> None:
+        target = target_tier.strip().rstrip("/") or self._queue_url
+        if target not in {self._queue_url, self._priority_queue_url, self._secondary_queue_url}:
+            raise QueueError("result delivery target is not a configured queue tier")
+        if dead_letter:
+            target = self._dead_letter_queue_url
+            if not target:
+                raise QueueError("queue.dead_letter_queue_url is required for result exhaustion")
+        if not 0 <= delay_seconds <= 900:
+            raise QueueError("queue delay must be between 0 and 900 seconds")
         try:
             self._sqs.send_message(
-                QueueUrl=self._queue_url,
+                QueueUrl=target,
                 MessageBody=job.model_dump_json(),
+                DelaySeconds=delay_seconds,
             )
         except Exception as exc:
             raise QueueError(f"cannot publish job {job.job_id}: {exc}") from exc
