@@ -383,7 +383,41 @@ def _project(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarise(report: dict[str, Any] | None, error: str = "") -> dict[str, Any]:
+def _killed_judge(signal_name: str) -> dict[str, Any]:
+    """A submission that killed the judge: a runtime error, with its cause.
+
+    Sent with no ``error`` on purpose. ams-api treats any error as "this
+    machine could not judge" and requeues, which is exactly the loop that
+    spent five attempts on each of these and then reported nothing.
+    """
+    message = f"The judge was killed by {signal_name} while running this submission."
+    return {
+        "verdict": "RE",
+        "passed_count": 0,
+        "total_count": 1,
+        "max_runtime_ms": 0,
+        "max_memory_kb": 0,
+        "compile_output": "",
+        "testcases": [
+            {
+                "kind": "io",
+                "testcase_no": 1,
+                "label": "Judge run",
+                "verdict": "RE",
+                "runtime_ms": 0,
+                "memory_kb": 0,
+                "exit_code": 0,
+                "checker_message": message,
+            }
+        ],
+        "error": "",
+        "judge_signal": signal_name,
+    }
+
+
+def summarise(
+    report: dict[str, Any] | None, error: str = "", *, judge_signal: str | None = None
+) -> dict[str, Any]:
     """Reduce a cxxprobe JudgeReport to what AMS records.
 
     cxxprobe checks three independent things, and a problem may use any
@@ -400,6 +434,9 @@ def summarise(report: dict[str, Any] | None, error: str = "") -> dict[str, Any]:
     A submission that would not compile is **CE**, not a failed job — the
     pipeline worked exactly as intended and produced a real verdict.
     """
+    if judge_signal is not None:
+        return _killed_judge(judge_signal)
+
     if report is None:
         return {
             "verdict": "SE",
@@ -581,7 +618,7 @@ class ControlPlaneClient:
         if not self.enabled:
             return True
 
-        summary = summarise(result.report, result.error or "")
+        summary = summarise(result.report, result.error or "", judge_signal=result.judge_signal)
         if result.status is JobStatus.RETRYABLE:
             # Nothing to report: the job did not produce a verdict and will
             # be redelivered.

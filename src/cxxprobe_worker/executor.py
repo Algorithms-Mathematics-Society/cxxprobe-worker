@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import signal
 import subprocess
 import time
 import zipfile
@@ -49,6 +50,26 @@ from cxxprobe_worker.workspace import Workspace, WorkspaceManager
 
 # `cxxprobe judge` exit codes. 0 and 1 both mean "judging happened".
 JUDGED_EXIT_CODES = frozenset({0, 1})
+
+# Signals that kill cxxprobe *because of what it was running*: a submission
+# that stops reading its input (SIGPIPE, cxxprobe#1), or code that corrupts
+# memory badly enough to take the harness down with it. They recur on every
+# host, so they are the submission's runtime error, not a retry.
+#
+# Anything else that kills the judge (SIGKILL from the OOM killer or an
+# operator, SIGTERM on shutdown) comes from outside and is still retried.
+SUBMISSION_SIGNALS = frozenset(
+    {
+        signal.SIGPIPE,
+        signal.SIGSEGV,
+        signal.SIGABRT,
+        signal.SIGBUS,
+        signal.SIGFPE,
+        signal.SIGILL,
+        signal.SIGSYS,
+        signal.SIGTRAP,
+    }
+)
 
 # The `compile` steps in a cxxprobe report that build the submission itself.
 SUBMISSION_COMPILE_STEPS = ("solution", "behavior_binary")
@@ -184,6 +205,17 @@ def _project_failure(report: dict[str, Any]) -> str | None:
                 detail = str(step.get("diagnostics") or "").strip()
                 return f"project parts failed to link: {detail}".rstrip(": ")
     return None
+
+
+def signal_name(returncode: int) -> str | None:
+    """``SIGPIPE`` for -13: subprocess reports death by signal as a negative
+    exit code, which on its own (`exit -13`, no output) diagnoses nothing."""
+    if returncode >= 0:
+        return None
+    try:
+        return signal.Signals(-returncode).name
+    except ValueError:
+        return f"signal {-returncode}"
 
 
 def _is_zip(path: Path) -> bool:
@@ -627,7 +659,10 @@ class JobExecutor:
         # it could not judge (a broken sandbox, for instance, yields a report
         # whose overall is ERROR). Trusting the report there would record a
         # verdict for a submission that was never actually run.
-        if completed.returncode not in JUDGED_EXIT_CODES:
+        killed_by = signal_name(completed.returncode)
+        if killed_by is not None:
+            result = self._judge_killed(job, completed, duration, report, killed_by)
+        elif completed.returncode not in JUDGED_EXIT_CODES:
             detail = completed.stderr.strip() or completed.stdout.strip() or "(no output)"
             if report is not None:
                 detail = _diagnostics_from(report) or detail
@@ -723,6 +758,51 @@ class JobExecutor:
                     name = f"parts/{label}/compile.log"
                     artifacts[name] = self._storage.put_text(job.job_id, name, log)
         return artifacts
+
+    def _judge_killed(
+        self,
+        job: Job,
+        completed: subprocess.CompletedProcess[str],
+        duration: float,
+        report: dict[str, Any] | None,
+        name: str,
+    ) -> JobResult:
+        """cxxprobe itself died by signal: say whose fault that was.
+
+        A judge that could not start (no toolchain, no sandbox, no package)
+        exits 2 and never gets here. One killed by a signal was already
+        running the submission, and for the signals a submission causes it
+        dies identically on every attempt, so retrying spent the whole budget
+        and left the candidate with a job that looked lost. Those end now
+        with a terminal result naming the signal; the rest are retried.
+        """
+        by_submission = -completed.returncode in SUBMISSION_SIGNALS
+        detail = completed.stderr.strip() or completed.stdout.strip() or "(no output)"
+        self._log.warning(
+            "judge.killed_by_submission" if by_submission else "judge.killed_externally",
+            job_id=job.job_id,
+            signal=name,
+            exit_code=completed.returncode,
+            detail=detail[:500],
+        )
+        if by_submission:
+            return JobResult(
+                job_id=job.job_id,
+                status=JobStatus.FAILED,
+                exit_code=completed.returncode,
+                duration_seconds=duration,
+                report=report,
+                judge_signal=name,
+                error=f"the judge was killed by {name} while running this submission: {detail}",
+            )
+        return JobResult(
+            job_id=job.job_id,
+            status=JobStatus.RETRYABLE,
+            exit_code=completed.returncode,
+            duration_seconds=duration,
+            report=report,
+            error=f"the judge was killed by {name} from outside the job: {detail}",
+        )
 
     def _read_report(self, workspace: Workspace) -> dict[str, object] | None:
         if not workspace.report_path.is_file():

@@ -184,6 +184,11 @@ class JobResult(BaseModel):
     artifacts: dict[str, str] = Field(default_factory=dict)
     """Artifact name → storage locator."""
 
+    judge_signal: str | None = None
+    """The signal that killed cxxprobe itself (``SIGPIPE``, ``SIGSEGV``, …),
+    when that is how the run ended. Set only when the submission is to blame,
+    which makes it a runtime error with a verdict rather than a retry."""
+
     package_cache: Literal["hit", "miss"] | None = None
     """Whether this job's package came from the local cache. ``None`` when
     the package was local and the cache never applied."""
