@@ -172,6 +172,19 @@ def _materialise(uri: str, destination: Path, fetcher: Any) -> Path:
     return fetched
 
 
+def _stage_file(uri: str, destination: Path, fetcher: Any, what: str) -> None:
+    """Fetch or copy one source file to ``destination``."""
+    source = _materialise(uri, destination, fetcher)
+    if source == destination:
+        return
+    if not source.is_file():
+        raise PreparationError(f"{what} not found: {source}")
+    try:
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        raise PreparationError(f"cannot stage {what}: {exc}") from exc
+
+
 def _stage_inputs(
     job: Job, workspace: Workspace, fetcher: Any = None, cache: Any = None
 ) -> tuple[str, Path]:
@@ -181,16 +194,94 @@ def _stage_inputs(
     Copying (or downloading) rather than referencing in place means a job can
     never mutate shared state, and a retry starts from identical inputs.
     """
-    from cxxprobe_worker.aws.fetch import is_remote
+    if job.submission_path is None:
+        raise PreparationError("problem job has no submission_path")
+    _stage_file(job.submission_path, workspace.submission_path, fetcher, "submission")
+    return _stage_package(job, workspace, fetcher, cache)
 
-    submission_src = _materialise(job.submission_path, workspace.submission_path, fetcher)
-    if submission_src != workspace.submission_path:
-        if not submission_src.is_file():
-            raise PreparationError(f"submission not found: {submission_src}")
-        try:
-            shutil.copy2(submission_src, workspace.submission_path)
-        except OSError as exc:
-            raise PreparationError(f"cannot stage submission: {exc}") from exc
+
+def _stage_parts(job: Job, workspace: Workspace, fetcher: Any = None) -> dict[str, Path]:
+    """Bring every part of a project job into the one workspace, by label.
+
+    Through the same fetch path as an ordinary submission, so a part can be
+    a local file or an s3:// URI alike, and none of them is ever cached.
+    """
+    staged: dict[str, Path] = {}
+    try:
+        workspace.parts_dir.mkdir(exist_ok=True)
+    except OSError as exc:
+        raise PreparationError(f"cannot create parts directory: {exc}") from exc
+    for label, uri in sorted((job.parts or {}).items()):
+        destination = workspace.part_path(label)
+        _stage_file(uri, destination, fetcher, f"submission for part {label}")
+        staged[label] = destination
+    return staged
+
+
+def declared_part_labels(package: Path, project_slug: str) -> list[str] | None:
+    """The part labels a package declares for ``project_slug``.
+
+    Read from the pack's ``manifest.json`` (``projects[].parts[].label``),
+    which exists so a consumer need not open the project itself to learn its
+    shape. ``None`` when there is no readable declaration at all, which leaves
+    the decision to cxxprobe; ``[]`` when the package declares projects but
+    not this one.
+    """
+    try:
+        if _is_zip(package):
+            with zipfile.ZipFile(package) as archive:
+                try:
+                    raw = archive.read("manifest.json")
+                except KeyError:
+                    return None
+        elif (package / "manifest.json").is_file():
+            raw = (package / "manifest.json").read_bytes()
+        else:
+            return None
+        manifest = json.loads(raw)
+    except (OSError, zipfile.BadZipFile, ValueError):
+        return None
+
+    projects = manifest.get("projects") if isinstance(manifest, dict) else None
+    if not isinstance(projects, list):
+        return None
+    for project in projects:
+        if isinstance(project, dict) and project.get("slug") == project_slug:
+            return [
+                str(part["label"])
+                for part in project.get("parts") or []
+                if isinstance(part, dict) and part.get("label") is not None
+            ]
+    return []
+
+
+def _check_parts_against_package(job: Job, package: Path) -> None:
+    """Refuse a project job whose parts don't match what the package declares.
+
+    Before any part is fetched. An unsupplied part is not harmless: cxxprobe
+    fills it with its reference, so a team missing a part would be graded as
+    though it had written one.
+    """
+    slug = job.project_slug or ""
+    declared = declared_part_labels(package, slug)
+    if declared is None:
+        return
+    if not declared:
+        raise PreparationError(f"package declares no project {slug!r}")
+    supplied = set(job.parts or {})
+    unknown = sorted(supplied - set(declared))
+    if unknown:
+        raise PreparationError(f"project {slug!r} has no part labelled {', '.join(unknown)}")
+    missing = [label for label in declared if label not in supplied]
+    if missing:
+        raise PreparationError(f"project {slug!r} has no submission for part {', '.join(missing)}")
+
+
+def _stage_package(
+    job: Job, workspace: Workspace, fetcher: Any = None, cache: Any = None
+) -> tuple[str, Path]:
+    """Bring the job's package into its workspace, through the cache when remote."""
+    from cxxprobe_worker.aws.fetch import is_remote
 
     if is_remote(job.package_path):
         # A remote package is always a .cxxpkg zip; cxxprobe unpacks it.
@@ -199,7 +290,7 @@ def _stage_inputs(
         # *submission* for a handful of distinct packages, and on a fleet
         # spread across regions — which the account's quotas force — each of
         # those is a cross-region round trip costing more than the job. See
-        # packages.py. The submission below is never cached; it is different
+        # packages.py. Submissions are never cached; they are different
         # every time.
         staged = workspace.root / "package.zip"
         if cache is not None:
@@ -263,7 +354,13 @@ class JobExecutor:
     def execute(self, job: Job) -> JobResult:
         """Run one job to completion. Never raises for a job-level failure."""
         started = time.monotonic()
-        self._log.info("job.start", job_id=job.job_id, problem=job.problem_slug)
+        self._log.info(
+            "job.start",
+            job_id=job.job_id,
+            job_type=job.job_type,
+            problem=job.problem_slug,
+            project=job.project_slug,
+        )
 
         try:
             with self._workspaces.session(job.job_id) as workspace:
@@ -298,6 +395,9 @@ class JobExecutor:
         return result
 
     def _run_in_workspace(self, job: Job, workspace: Workspace, started: float) -> JobResult:
+        if job.job_type == "project":
+            return self._run_project(job, workspace, started)
+
         package_flag, package_path = _stage_inputs(job, workspace, self._fetcher, self._packages)
 
         argv = [
@@ -364,6 +464,21 @@ class JobExecutor:
             )
 
         return self._interpret(job, workspace, completed, started)
+
+    def _run_project(self, job: Job, workspace: Workspace, started: float) -> JobResult:
+        """Stage a project job: its package, then every part by label."""
+        _, package_path = _stage_package(job, workspace, self._fetcher, self._packages)
+        _check_parts_against_package(job, package_path)
+        staged = _stage_parts(job, workspace, self._fetcher)
+        self._log.info(
+            "project.staged", job_id=job.job_id, project=job.project_slug, parts=sorted(staged)
+        )
+        return JobResult(
+            job_id=job.job_id,
+            status=JobStatus.FAILED,
+            duration_seconds=time.monotonic() - started,
+            error="project jobs are staged but this worker cannot judge them yet",
+        )
 
     def _interpret(
         self,
