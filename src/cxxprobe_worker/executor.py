@@ -8,7 +8,13 @@ or what a problem package contains. It knows one command:
             [--custom-cases FILE]
                    --submission FILE --output REPORT.json
 
-and one contract:
+and, for a project job, its sibling over an unpacked contest pack:
+
+    cxxprobe test project SLUG --dir CONTEST
+            --submission LABEL=FILE ...  [--fallback LABEL=reference|empty ...]
+            --json
+
+and one contract, shared by both:
 
     exit 0  → judged, everything passed
     exit 1  → judged, something failed (a real WA/TLE verdict)
@@ -148,6 +154,38 @@ def _submission_crashed_at_runtime(report: dict[str, Any]) -> bool:
     )
 
 
+def _project_failure(report: dict[str, Any]) -> str | None:
+    """Why a project run that exited 2 is the submitters' fault, if it is.
+
+    Written against the report cxxprobe#6 describes: ``parts`` keyed by label,
+    each shaped like an ordinary judge report, and an ``integration`` block
+    whose ``compile`` step builds every part together. A part that will not
+    compile or crashes its own tests, or parts that compile alone but will
+    not link, fail identically on every worker, so retrying only burns the
+    queue. Returns the message to record, or ``None`` for a machine fault.
+    """
+    parts = report.get("parts")
+    if isinstance(parts, dict):
+        for label, part in sorted(parts.items()):
+            if not isinstance(part, dict):
+                continue
+            if _submission_failed_to_compile(part):
+                detail = _diagnostics_from(part)
+                return f"part {label} failed to compile: {detail}".rstrip(": ")
+            if _submission_crashed_at_runtime(part):
+                return f"part {label} crashed during testing"
+
+    integration = report.get("integration")
+    if isinstance(integration, dict):
+        step = integration.get("compile")
+        if isinstance(step, dict) and step.get("ok") is False:
+            exit_code = step.get("exit_code")
+            if isinstance(exit_code, int) and exit_code >= 0:
+                detail = str(step.get("diagnostics") or "").strip()
+                return f"project parts failed to link: {detail}".rstrip(": ")
+    return None
+
+
 def _is_zip(path: Path) -> bool:
     return path.is_file() and zipfile.is_zipfile(path)
 
@@ -260,7 +298,8 @@ def _check_parts_against_package(job: Job, package: Path) -> None:
 
     Before any part is fetched. An unsupplied part is not harmless: cxxprobe
     fills it with its reference, so a team missing a part would be graded as
-    though it had written one.
+    though it had written one. A part may only be absent when the job names a
+    fallback for it.
     """
     slug = job.project_slug or ""
     declared = declared_part_labels(package, slug)
@@ -272,7 +311,8 @@ def _check_parts_against_package(job: Job, package: Path) -> None:
     unknown = sorted(supplied - set(declared))
     if unknown:
         raise PreparationError(f"project {slug!r} has no part labelled {', '.join(unknown)}")
-    missing = [label for label in declared if label not in supplied]
+    covered = supplied | set(job.fallback or {})
+    missing = [label for label in declared if label not in covered]
     if missing:
         raise PreparationError(f"project {slug!r} has no submission for part {', '.join(missing)}")
 
@@ -439,9 +479,72 @@ class JobExecutor:
         argv += self._judge.extra_args
         self._log.debug("judge.invoke", job_id=job.job_id, argv=argv)
 
+        completed = self._invoke(job, started, argv)
+        if isinstance(completed, JobResult):
+            return completed
+        return self._interpret(job, workspace, completed, started)
+
+    def _run_project(self, job: Job, workspace: Workspace, started: float) -> JobResult:
+        """Judge a project job: every part, then their integration, in one run.
+
+        The worker never loops over parts itself. cxxprobe owns per-part and
+        integration judging; this only hands it the sources by label.
+        """
+        package_flag, package_path = _stage_package(job, workspace, self._fetcher, self._packages)
+        _check_parts_against_package(job, package_path)
+        staged = _stage_parts(job, workspace, self._fetcher)
+
+        if package_flag == "--package":
+            contest = workspace.contest_dir
+            unpacked = self._invoke(
+                job,
+                started,
+                [self._judge.binary, "package", "unpack", str(package_path), "--dir", str(contest)],
+            )
+            if isinstance(unpacked, JobResult):
+                return unpacked
+            if unpacked.returncode != 0:
+                detail = unpacked.stderr.strip() or unpacked.stdout.strip() or "(no output)"
+                raise PreparationError(f"cannot unpack project package: {detail}")
+        else:
+            contest = package_path
+
+        argv = [
+            self._judge.binary,
+            "test",
+            "project",
+            job.project_slug or "",
+            "--dir",
+            str(contest),
+        ]
+        for label, path in sorted(staged.items()):
+            argv += ["--submission", f"{label}={path}"]
+        for label, mode in sorted((job.fallback or {}).items()):
+            argv += ["--fallback", f"{label}={mode}"]
+        # No `extra_args`: they are flags for `cxxprobe judge`, which this
+        # subcommand may not accept.
+        argv.append("--json")
+        self._log.debug("judge.invoke", job_id=job.job_id, argv=argv)
+
+        completed = self._invoke(job, started, argv)
+        if isinstance(completed, JobResult):
+            return completed
+
+        # `test` prints its report rather than writing a file. Kept in the
+        # workspace under the usual name so everything downstream is shared.
         try:
-            # argv is built here from config and job paths — never shell-parsed.
-            completed = subprocess.run(
+            workspace.report_path.write_text(completed.stdout, encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("report.unwritable", job_id=job.job_id, error=str(exc))
+        return self._interpret(job, workspace, completed, started, stdout_is_report=True)
+
+    def _invoke(
+        self, job: Job, started: float, argv: list[str]
+    ) -> subprocess.CompletedProcess[str] | JobResult:
+        """Run one cxxprobe command, or say why it could not start."""
+        try:
+            # argv is built from config and job paths — never shell-parsed.
+            return subprocess.run(
                 argv,
                 capture_output=True,
                 text=True,
@@ -460,25 +563,8 @@ class JobExecutor:
                 job_id=job.job_id,
                 status=JobStatus.RETRYABLE,
                 duration_seconds=time.monotonic() - started,
-                error=f"cxxprobe judge exceeded {self._judge.timeout_seconds}s",
+                error=f"cxxprobe {argv[1]} exceeded {self._judge.timeout_seconds}s",
             )
-
-        return self._interpret(job, workspace, completed, started)
-
-    def _run_project(self, job: Job, workspace: Workspace, started: float) -> JobResult:
-        """Stage a project job: its package, then every part by label."""
-        _, package_path = _stage_package(job, workspace, self._fetcher, self._packages)
-        _check_parts_against_package(job, package_path)
-        staged = _stage_parts(job, workspace, self._fetcher)
-        self._log.info(
-            "project.staged", job_id=job.job_id, project=job.project_slug, parts=sorted(staged)
-        )
-        return JobResult(
-            job_id=job.job_id,
-            status=JobStatus.FAILED,
-            duration_seconds=time.monotonic() - started,
-            error="project jobs are staged but this worker cannot judge them yet",
-        )
 
     def _interpret(
         self,
@@ -486,9 +572,12 @@ class JobExecutor:
         workspace: Workspace,
         completed: subprocess.CompletedProcess[str],
         started: float,
+        *,
+        stdout_is_report: bool = False,
     ) -> JobResult:
         duration = time.monotonic() - started
         report = self._read_report(workspace)
+        command = "test project" if job.job_type == "project" else "judge"
 
         # The exit code — not the presence of a report — decides whether
         # judging happened. cxxprobe exits 2 *and still writes a report* when
@@ -506,9 +595,16 @@ class JobExecutor:
             # share of submissions are exactly this.
             would_not_compile = report is not None and _submission_failed_to_compile(report)
             crashed = report is not None and _submission_crashed_at_runtime(report)
-            submitter_at_fault = would_not_compile or crashed
+            project_fault = (
+                _project_failure(report)
+                if report is not None and job.job_type == "project"
+                else None
+            )
+            submitter_at_fault = would_not_compile or crashed or project_fault is not None
 
-            if would_not_compile:
+            if project_fault is not None:
+                message = project_fault
+            elif would_not_compile:
                 message = f"submission failed to compile: {detail}"
             elif crashed:
                 # Named distinctly from a compile failure because the remedy
@@ -516,7 +612,9 @@ class JobExecutor:
                 # memory-unsafe code that killed the test binary.
                 message = f"submission crashed during testing: {detail}"
             else:
-                message = f"cxxprobe judge could not judge (exit {completed.returncode}): {detail}"
+                message = (
+                    f"cxxprobe {command} could not judge (exit {completed.returncode}): {detail}"
+                )
 
             result = JobResult(
                 job_id=job.job_id,
@@ -535,7 +633,7 @@ class JobExecutor:
                 exit_code=completed.returncode,
                 duration_seconds=duration,
                 error=(
-                    f"cxxprobe judge exited {completed.returncode} without writing a report: "
+                    f"cxxprobe {command} exited {completed.returncode} without writing a report: "
                     f"{completed.stderr.strip() or completed.stdout.strip() or '(no output)'}"
                 ),
             )
@@ -548,7 +646,9 @@ class JobExecutor:
                 report=report,
             )
 
-        result.artifacts = self._persist(job, workspace, completed, result)
+        result.artifacts = self._persist(
+            job, workspace, completed, result, include_stdout=not stdout_is_report
+        )
         return result
 
     def _read_report(self, workspace: Workspace) -> dict[str, object] | None:
@@ -570,6 +670,8 @@ class JobExecutor:
         workspace: Workspace,
         completed: subprocess.CompletedProcess[str],
         result: JobResult,
+        *,
+        include_stdout: bool = True,
     ) -> dict[str, str]:
         """Store the report and the judge's own output.
 
@@ -583,7 +685,7 @@ class JobExecutor:
                 artifacts["report.json"] = self._storage.put_text(
                     job.job_id, "report.json", json.dumps(result.report, indent=2)
                 )
-            if completed.stdout:
+            if include_stdout and completed.stdout:
                 artifacts["stdout.log"] = self._storage.put_text(
                     job.job_id, "stdout.log", completed.stdout
                 )

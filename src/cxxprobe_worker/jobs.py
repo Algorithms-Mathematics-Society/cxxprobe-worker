@@ -82,6 +82,14 @@ class Job(BaseModel):
     """The project inside the package to judge. Required for a ``project``
     job: unlike a problem package, a contest pack can hold several."""
 
+    fallback: dict[str, Literal["reference", "empty"]] | None = None
+    """Part label → what cxxprobe substitutes when that part is not supplied.
+
+    ``reference`` keeps the other parts gradeable when one never showed up;
+    ``empty`` proves the integration genuinely needs it. Project jobs only.
+    A label named here may be left out of ``parts``.
+    """
+
     problem_slug: str | None = None
     """Advisory only — cxxprobe resolves the problem from the package itself.
 
@@ -131,6 +139,8 @@ class Job(BaseModel):
                 raise ValueError("a problem job must not carry parts")
             if self.project_slug is not None:
                 raise ValueError("a problem job must not carry project_slug")
+            if self.fallback is not None:
+                raise ValueError("a problem job must not carry fallback")
             if not self.submission_path:
                 raise ValueError("a problem job needs submission_path")
             return self
@@ -143,7 +153,7 @@ class Job(BaseModel):
             raise ValueError("a project job needs project_slug")
         if self.custom_cases is not None:
             raise ValueError("custom_cases is not supported on a project job")
-        for label in self.parts:
+        for label in [*self.parts, *(self.fallback or {})]:
             if not PART_LABEL.match(label):
                 raise ValueError(f"part label {label!r} is not a plain name")
         return self

@@ -41,6 +41,11 @@ class Workspace:
         return self.root / "submission.cpp"
 
     @property
+    def contest_dir(self) -> Path:
+        """Where a project job's contest pack is unpacked for cxxprobe."""
+        return self.root / "contest"
+
+    @property
     def parts_dir(self) -> Path:
         """A project job's part sources, one file per label."""
         return self.root / "parts"
