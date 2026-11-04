@@ -64,6 +64,33 @@ class S3ArtifactStorage:
             raise StorageError(f"cannot write s3://{self._bucket}/{key}: {exc}") from exc
         return self._locator(key)
 
+    def put_immutable(self, job_id: str, name: str, data: bytes) -> str:
+        key = self._key_for(job_id, name)
+        # Envelope names contain a fresh execution UUID. Conditional creation is
+        # mandatory: an older SDK must fail closed, never permit replacement.
+        parameters: dict[str, Any] = {"Bucket": self._bucket, "Key": key, "Body": data}
+        shape = self._s3.meta.service_model.operation_model("PutObject").input_shape
+        if shape is None or "IfNoneMatch" not in shape.members:
+            raise StorageError("immutable S3 writes require boto3 PutObject.IfNoneMatch support")
+        parameters["IfNoneMatch"] = "*"
+        try:
+            self._s3.put_object(**parameters)
+        except Exception as exc:
+            raise StorageError(f"cannot persist {self._locator(key)}: {exc}") from exc
+        return self._locator(key)
+
+    def list_prefix(self, job_id: str, prefix: str, limit: int) -> list[str]:
+        base = self._key_for(job_id, prefix).rstrip("/") + "/"
+        job_base = self._key_for(job_id, "placeholder").removesuffix("placeholder")
+        try:
+            page = self._s3.list_objects_v2(Bucket=self._bucket, Prefix=base, MaxKeys=limit + 1)
+        except Exception as exc:
+            raise StorageError(f"cannot list {self._locator(base)}: {exc}") from exc
+        contents = page.get("Contents", [])
+        if page.get("IsTruncated") or len(contents) > limit:
+            raise StorageError(f"result lookup limit exceeded for {job_id}/{prefix}")
+        return sorted(obj["Key"][len(job_base) :] for obj in contents)
+
     def put_text(self, job_id: str, name: str, text: str) -> str:
         return self.put_bytes(job_id, name, text.encode())
 

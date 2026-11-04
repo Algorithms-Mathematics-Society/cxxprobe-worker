@@ -451,9 +451,11 @@ def _stage_package(
         return "--package", staged
 
     if package.is_dir():
-        # Keep the package's own directory name: cxxprobe derives a problem's
-        # slug (and a contest's projects) from it, so staging into a fixed
-        # name would report every directory problem as `package`.
+        # cxxprobe derives the slug from this directory name. Resolve dot/parent
+        # paths before taking the basename so staging stays inside the workspace.
+        package = package.resolve()
+        if not package.name:
+            raise PreparationError("problem directory has no usable basename")
         staged = workspace.package_dir / package.name
         try:
             shutil.copytree(package, staged, dirs_exist_ok=True)
@@ -543,7 +545,7 @@ class JobExecutor:
             duration_seconds=round(result.duration_seconds, 3),
             error=result.error,
         )
-        return result
+        return result.model_copy(update={"attempt_token": job.attempt_token})
 
     def _run_in_workspace(
         self, job: Job, workspace: Workspace, started: float, outcome: dict[str, str]

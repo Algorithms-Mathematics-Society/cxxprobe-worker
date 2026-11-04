@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -98,7 +99,22 @@ class Job(BaseModel):
     """
 
     metadata: dict[str, Any] = Field(default_factory=dict)
-    """Opaque passthrough (submission id, contest id, …). Never interpreted."""
+    """Passthrough plus optional attempt_token and reserved delivery marker."""
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_attempt_token(cls, value: dict[str, Any]) -> dict[str, Any]:
+        token = value.get("attempt_token")
+        if token is not None:
+            if not isinstance(token, str):
+                raise ValueError("metadata.attempt_token must be a UUID string or null")
+            value = {**value, "attempt_token": str(UUID(token))}
+        return value
+
+    @property
+    def attempt_token(self) -> str | None:
+        token = self.metadata.get("attempt_token")
+        return token if isinstance(token, str) else None
 
     custom_cases: list[dict[str, Any]] | None = None
     """Candidate-supplied cases: ``[{"label":…, "input":…, "expected":…}]``.
@@ -173,6 +189,7 @@ class JobResult(BaseModel):
 
     job_id: str
     status: JobStatus
+    attempt_token: str | None = None
     exit_code: int | None = None
     duration_seconds: float = 0.0
     report: dict[str, Any] | None = None

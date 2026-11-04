@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 ENV_PREFIX = "CXXPROBE_WORKER_"
 ENV_NESTED_SEP = "__"
@@ -120,6 +120,9 @@ class QueueConfig(BaseModel):
     secondary_queue_url: str = ""
     """SQS backend only. Required when backend is ``sqs``."""
 
+    dead_letter_queue_url: str = ""
+    """Required for opt-in durable result delivery on SQS."""
+
     wait_time_seconds: int = Field(default=20, ge=0, le=20)
     """SQS long-poll duration. 20s is the maximum and the difference between
     one API call per job and one per poll interval."""
@@ -140,6 +143,23 @@ class QueueConfig(BaseModel):
     ``submission-evaluation``). If it's set higher, the message dead-letters
     before any worker gives up, which is the silent "queued for ever" case.
     """
+
+    @field_validator(
+        "queue_url", "priority_queue_url", "secondary_queue_url", "dead_letter_queue_url"
+    )
+    @classmethod
+    def _normalize_queue_urls(cls, value: str) -> str:
+        return value.strip().rstrip("/")
+
+    @model_validator(mode="after")
+    def _separate_dead_letter_queue(self) -> Self:
+        if self.dead_letter_queue_url and self.dead_letter_queue_url in {
+            self.queue_url,
+            self.priority_queue_url,
+            self.secondary_queue_url,
+        }:
+            raise ValueError("dead-letter queue must differ from every polled queue tier")
+        return self
 
 
 class AwsConfig(BaseModel):
@@ -199,6 +219,11 @@ class WorkerConfig(BaseModel):
     Used by ``--once`` and by deployments that prefer periodic recycling over
     trusting a long-lived process not to leak.
     """
+
+    result_delivery_enabled: bool = False
+    """Enable durable callback replay for token-bearing jobs only."""
+    result_delivery_max_rounds: int = Field(default=8, ge=1, le=100)
+    result_delivery_deadline_seconds: int = Field(default=3600, ge=1, le=604800)
 
     aws: AwsConfig = Field(default_factory=AwsConfig)
     control_plane: ControlPlaneConfig = Field(default_factory=ControlPlaneConfig)

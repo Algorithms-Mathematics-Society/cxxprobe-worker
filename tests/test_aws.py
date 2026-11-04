@@ -431,3 +431,90 @@ def test_without_a_priority_queue_nothing_changes(sqs_queue):
     assert lease is not None
     assert lease.job.job_id == "only"
     assert queue.claim() is None
+
+
+def test_immutable_s3_creation_is_conditional_and_rejects_overwrite(
+    storage, s3_client, monkeypatch
+):
+    from unittest.mock import Mock
+
+    real_put = s3_client.put_object
+    spy = Mock(wraps=real_put)
+    monkeypatch.setattr(s3_client, "put_object", spy)
+    storage.put_immutable("j", "results/a.json", b"original")
+    assert spy.call_args.kwargs["IfNoneMatch"] == "*"
+    with pytest.raises(StorageError):
+        storage.put_immutable("j", "results/a.json", b"changed")
+    assert storage.get_bytes("j", "results/a.json") == b"original"
+
+
+def test_immutable_s3_creation_fails_closed_on_unsupported_sdk():
+    from unittest.mock import Mock
+
+    client = Mock()
+    client.meta.service_model.operation_model.return_value.input_shape.members = {}
+    storage = S3ArtifactStorage("bucket", client=client)
+    with pytest.raises(StorageError, match="IfNoneMatch"):
+        storage.put_immutable("j", "results/a.json", b"data")
+    client.put_object.assert_not_called()
+
+
+def test_s3_lookup_is_bounded_to_attempt_prefix(storage, s3_client, monkeypatch):
+    from unittest.mock import Mock
+
+    storage.put_immutable("j", "results/token/a.json", b"a")
+    storage.put_immutable("j", "results/other/b.json", b"b")
+    spy = Mock(wraps=s3_client.list_objects_v2)
+    monkeypatch.setattr(s3_client, "list_objects_v2", spy)
+    assert storage.list_prefix("j", "results/token/", 32) == ["results/token/a.json"]
+    spy.assert_called_once_with(Bucket=BUCKET, Prefix="artifacts/j/results/token/", MaxKeys=33)
+    for i in range(2):
+        storage.put_immutable("j", f"results/token/{i}.json", b"data")
+    with pytest.raises(StorageError, match="limit exceeded"):
+        storage.list_prefix("j", "results/token/", 1)
+
+
+@pytest.mark.parametrize("tier", ["main", "priority", "backlog"])
+def test_dlq_must_differ_from_all_polled_tiers_even_during_rollback(tier: str):
+    from unittest.mock import Mock
+
+    from cxxprobe_worker.queue import QueueError
+
+    with pytest.raises(QueueError, match="differ"):
+        SqsJobQueue(
+            " main/ ",
+            client=Mock(),
+            priority_queue_url="priority",
+            secondary_queue_url="backlog",
+            dead_letter_queue_url=f" {tier}/ ",
+        )
+
+
+def test_sqs_publisher_preserves_tier_delay_and_dead_letter_target():
+    from unittest.mock import Mock
+
+    from cxxprobe_worker.queue import QueueError
+
+    client = Mock()
+    queue = SqsJobQueue(
+        "main",
+        client=client,
+        priority_queue_url="priority",
+        secondary_queue_url="backlog",
+        dead_letter_queue_url="dead",
+    )
+    job = make_job("j")
+    for tier in ("main", "priority", "backlog"):
+        queue.publish(job, target_tier=tier, delay_seconds=7)
+    assert [call.kwargs["QueueUrl"] for call in client.send_message.call_args_list] == [
+        "main",
+        "priority",
+        "backlog",
+    ]
+    assert all(call.kwargs["DelaySeconds"] == 7 for call in client.send_message.call_args_list)
+    queue.publish(job, target_tier="priority", dead_letter=True)
+    assert client.send_message.call_args.kwargs["QueueUrl"] == "dead"
+    with pytest.raises(QueueError):
+        queue.publish(job, target_tier="unconfigured")
+    with pytest.raises(QueueError):
+        queue.publish(job, delay_seconds=901)

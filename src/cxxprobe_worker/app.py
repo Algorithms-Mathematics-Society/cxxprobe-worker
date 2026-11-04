@@ -34,6 +34,12 @@ class Application:
 
 
 def build_application(config: WorkerConfig) -> Application:
+    if (
+        config.result_delivery_enabled
+        and config.queue.backend == "sqs"
+        and not config.queue.dead_letter_queue_url
+    ):
+        raise ValueError("queue.dead_letter_queue_url is required for durable result delivery")
     logger = build_logger(
         level=config.monitoring.log_level,
         log_format=config.monitoring.log_format,
@@ -51,6 +57,7 @@ def build_application(config: WorkerConfig) -> Application:
         wait_time_seconds=config.queue.wait_time_seconds,
         secondary_queue_url=config.queue.secondary_queue_url,
         priority_queue_url=config.queue.priority_queue_url,
+        dead_letter_queue_url=config.queue.dead_letter_queue_url,
     )
     storage = build_storage(
         config.storage.backend,
@@ -89,7 +96,16 @@ def build_application(config: WorkerConfig) -> Application:
     )
 
     control_plane = ControlPlaneClient(config.control_plane, logger)
-    worker = Worker(config, queue, executor, logger, metrics, health, control_plane=control_plane)
+    worker = Worker(
+        config,
+        queue,
+        executor,
+        logger,
+        metrics,
+        health,
+        control_plane=control_plane,
+        storage=storage,
+    )
 
     return Application(
         config=config,
