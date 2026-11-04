@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from cxxprobe_worker.config import JudgeConfig
-from cxxprobe_worker.executor import JobExecutor
+from cxxprobe_worker.executor import JobExecutor, PreparationError, _stage_inputs
 from cxxprobe_worker.jobs import Job, JobStatus
 from cxxprobe_worker.storage import FilesystemArtifactStorage
 from cxxprobe_worker.workspace import WorkspaceManager
@@ -231,6 +233,43 @@ def test_directory_package_is_passed_with_the_problem_dir_flag(
     )
     assert result.report is not None
     assert "--problem-dir" in result.report["argv"]
+
+
+def test_directory_package_is_staged_under_its_own_name(tmp_path, workspaces, storage, logger):
+    """The slug cxxprobe reports comes from the staged directory's basename.
+
+    Staging to a fixed ``package/`` made every directory job report the slug
+    ``package``, so a correct verdict could not be attributed to the problem it
+    belonged to. Zip packages never had the bug, which is why it went unnoticed.
+    """
+    package = tmp_path / "exact-thirds"
+    package.mkdir()
+    (package / "problem.yaml").write_text("version: 2\nname: B\n")
+    submission = tmp_path / "sub.cpp"
+    submission.write_text("int main(){}\n")
+
+    recorder = tmp_path / "recorder"
+    recorder.write_text(
+        "#!/bin/sh\n"
+        'out=""; prev=""; dir=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--output" ]; then out="$a"; fi\n'
+        '  if [ "$prev" = "--problem-dir" ]; then dir="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'printf \'{"problem_dir": "%s"}\' "$dir" > "$out"\n'
+        "exit 0\n"
+    )
+    recorder.chmod(0o755)
+    executor = build_executor(recorder, workspaces, storage, logger)
+
+    result = executor.execute(
+        Job(job_id="j1", package_path=str(package), submission_path=str(submission))
+    )
+    assert result.status is JobStatus.SUCCEEDED
+    assert result.report is not None
+    staged = Path(result.report["problem_dir"])
+    assert staged.name == "exact-thirds", "slug source must survive staging"
 
 
 def test_artifacts_are_persisted_for_a_successful_job(
@@ -524,3 +563,64 @@ def test_empty_custom_cases_is_refused_rather_than_judged_normally(
     assert result.status is JobStatus.FAILED
     assert result.error is not None
     assert "empty" in result.error
+
+
+@pytest.mark.parametrize("location", ["absolute", "dot", "parent"])
+def test_directory_staging_preserves_basename_and_isolation(
+    tmp_path, workspaces, monkeypatch, location: str
+):
+    package, submission = make_inputs(tmp_path)
+    package = package.rename(tmp_path / "sum-two")
+    original_yaml = (package / "problem.yaml").read_bytes()
+    if location == "dot":
+        monkeypatch.chdir(package)
+        source = "."
+    elif location == "parent":
+        child = package / "child"
+        child.mkdir()
+        monkeypatch.chdir(child)
+        source = ".."
+    else:
+        source = str(package)
+    workspace = workspaces.create("staging-test")
+    flag, staged = _stage_inputs(
+        Job(job_id="staging-test", package_path=source, submission_path=str(submission)),
+        workspace,
+    )
+    assert flag == "--problem-dir"
+    assert staged == workspace.package_dir / "sum-two"
+    assert staged.resolve().is_relative_to(workspace.root.resolve())
+    assert (staged / "problem.yaml").read_bytes() == original_yaml
+    (staged / "problem.yaml").write_text("private workspace change")
+    assert (package / "problem.yaml").read_bytes() == original_yaml
+
+
+def test_directory_without_basename_is_rejected_before_copying(tmp_path, workspaces):
+    _, submission = make_inputs(tmp_path)
+    workspace = workspaces.create("root-test")
+    with pytest.raises(PreparationError, match="basename"):
+        _stage_inputs(
+            Job(job_id="root-test", package_path=tmp_path.anchor, submission_path=str(submission)),
+            workspace,
+        )
+
+
+def test_directory_staging_uses_symlink_target_name(tmp_path, workspaces):
+    package, submission = make_inputs(tmp_path)
+    package = package.rename(tmp_path / "sum-two")
+    original_yaml = (package / "problem.yaml").read_bytes()
+    alias = tmp_path / "problem-alias"
+    alias.symlink_to(package, target_is_directory=True)
+    workspace = workspaces.create("symlink-staging")
+
+    flag, staged = _stage_inputs(
+        Job(job_id="symlink-staging", package_path=str(alias), submission_path=str(submission)),
+        workspace,
+    )
+
+    assert flag == "--problem-dir"
+    assert staged == workspace.package_dir / "sum-two"
+    assert (staged / "problem.yaml").read_bytes() == original_yaml
+    assert not staged.is_symlink()
+    (staged / "problem.yaml").write_text("private workspace change")
+    assert (package / "problem.yaml").read_bytes() == original_yaml
