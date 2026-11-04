@@ -154,10 +154,11 @@ judging fleet. `bench-pool.sh up N | down | status` manages it.
   hosts is exactly what makes two timings incomparable. On-demand, because a
   spot reclaim mid-benchmark is a lost measurement.
 - **A whole physical core for the measured process.** `c7i.xlarge` is 4 vCPUs
-  = 2 cores. `bench-isolate-cpus.sh` confines every systemd slice, every IRQ
-  and the kernel's unbound workqueues to CPUs 0-1; the bencher runs in its own
-  `bench.slice` with `CPUAffinity=0-1`, and cxxprobe pins the measured
-  process to CPU 2, so CPU 3, its sibling, has nothing scheduled on it. A
+  = 2 cores, paired as CPUs 0+2 and 1+3 (read from sysfs, never assumed).
+  `bench-isolate-cpus.sh` confines every systemd slice, every IRQ and the
+  kernel's unbound workqueues to CPU 0's core; the bencher runs in its own
+  `bench.slice` with its threads on that core, and cxxprobe pins the measured
+  process to CPU 1, so CPU 3, its sibling, has nothing scheduled on it. A
   2-vCPU type cannot do this, which is why the pool does not reuse
   `c7i-flex.large`.
 - **One benchmark at a time per machine.** `role: bencher` forces
@@ -167,7 +168,7 @@ judging fleet. `bench-pool.sh up N | down | status` manages it.
 - **Calibration.** Each bencher calibrates before claiming and periodically
   after, and stops serving on drift. After the first pool is up, set
   `bench.calibration_baseline_ns` in `config/bench.yaml` to the measured
-  median (`cxxprobe bench calibrate --cpu 2 --json`).
+  median (`cxxprobe bench calibrate --cpu 1 --json`).
 - **Traceability.** `machine_id` is `<zone>/<type>/<instance-id>` and is
   stored with every measurement.
 

@@ -8,11 +8,39 @@
 # the bench service's slice keeps all CPUs so cxxprobe can pin a measured
 # process to BENCH_CPU, whose sibling then has nothing scheduled on it.
 #
-#   HOUSEKEEPING=0-1 BENCH_CPU=2 bench-isolate-cpus.sh
+# Topology comes from sysfs, never assumed: hyperthread numbering differs
+# between hosts, and on c7i.xlarge the pairs are CPUs 0+2 and 1+3, so "0-1"
+# would be two different cores. Housekeeping is CPU 0's whole physical core;
+# the measured CPU is the first CPU of another core. Both are written to
+# /etc/cxxprobe-worker/cpus.env for the service unit and the worker config.
+#
+#   bench-isolate-cpus.sh            # choose from the topology
+#   HOUSEKEEPING=0,2 BENCH_CPU=1 bench-isolate-cpus.sh
 set -euo pipefail
 
-HOUSEKEEPING="${HOUSEKEEPING:-0-1}"
-BENCH_CPU="${BENCH_CPU:-2}"
+topology() { cat "/sys/devices/system/cpu/cpu$1/topology/thread_siblings_list"; }
+expand() {
+  python3 -c 'import sys
+out = []
+for part in sys.argv[1].split(","):
+    a, _, b = part.partition("-")
+    out += range(int(a), int(b or a) + 1)
+print(" ".join(map(str, out)))' "$1"
+}
+
+HOUSEKEEPING="${HOUSEKEEPING:-$(topology 0)}"
+if [ -z "${BENCH_CPU:-}" ]; then
+  for cpu in $(expand "$(cat /sys/devices/system/cpu/online)"); do
+    if ! [[ " $(expand "$HOUSEKEEPING") " == *" $cpu "* ]]; then
+      BENCH_CPU=$cpu
+      break
+    fi
+  done
+fi
+if [ -z "${BENCH_CPU:-}" ]; then
+  echo "no CPU outside the housekeeping core ${HOUSEKEEPING}: this host cannot isolate a measurement" >&2
+  exit 1
+fi
 
 for slice in system.slice user.slice init.scope; do
   systemctl set-property --runtime "$slice" "AllowedCPUs=${HOUSEKEEPING}" || true
@@ -24,7 +52,7 @@ for irq in /proc/irq/*/smp_affinity_list; do
   echo "$HOUSEKEEPING" > "$irq" 2>/dev/null || true
 done
 if [ -w /sys/devices/virtual/workqueue/cpumask ]; then
-  # The cpumask file takes a hex mask; CPUs 0-1 -> 3.
+  # The cpumask file takes a hex mask; CPUs 0,2 -> 5.
   python3 - "$HOUSEKEEPING" > /sys/devices/virtual/workqueue/cpumask <<'PY'
 import sys
 mask = 0
@@ -39,8 +67,11 @@ fi
 # The measured core runs at a fixed, maximum frequency when the host allows
 # it (Nitro guests usually expose no cpufreq; that is fine).
 for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-  echo performance > "$gov" 2>/dev/null || true
+  [ -e "$gov" ] && echo performance > "$gov" 2>/dev/null || true
 done
 
-SIBLINGS=$(cat "/sys/devices/system/cpu/cpu${BENCH_CPU}/topology/thread_siblings_list")
+SIBLINGS=$(topology "$BENCH_CPU")
+mkdir -p /etc/cxxprobe-worker
+printf 'HOUSEKEEPING=%s\nBENCH_CPU=%s\nBENCH_CORE=%s\n' "$HOUSEKEEPING" "$BENCH_CPU" "$SIBLINGS" \
+  > /etc/cxxprobe-worker/cpus.env
 echo "bench cpu ${BENCH_CPU} (core ${SIBLINGS}); housekeeping ${HOUSEKEEPING}"

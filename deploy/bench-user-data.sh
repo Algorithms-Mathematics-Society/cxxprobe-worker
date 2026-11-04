@@ -7,7 +7,8 @@
 # point of the pool:
 #
 #   * one physical core is given to the measured process: the OS, IRQs and
-#     the worker itself are confined to CPUs 0-1 (bench-isolate-cpus.sh);
+#     the worker itself are confined to CPU 0's core (bench-isolate-cpus.sh,
+#     which reads the topology: on c7i.xlarge that core is CPUs 0+2);
 #   * the worker runs `--env bench` (role: bencher, concurrency 1, the
 #     benchmark queue only), and calibrates before it claims anything;
 #   * the machine id it records with every measurement is instance id plus
@@ -73,21 +74,23 @@ AWS_DEFAULT_REGION=${REGION}
 ENV
 
 echo "── one core for the measurement ───────────────────────"
-HOUSEKEEPING=0-1 BENCH_CPU=2 /opt/cxxprobe-worker/deploy/bench-isolate-cpus.sh
+/opt/cxxprobe-worker/deploy/bench-isolate-cpus.sh
+. /etc/cxxprobe-worker/cpus.env
+sed -i "s/^  cpu: .*/  cpu: ${BENCH_CPU}/" config/bench.yaml
 
 mkdir -p /var/lib/cxxprobe-worker/workspaces /var/lib/cxxprobe-worker/packages \
          /var/run/cxxprobe-worker
 
 echo "── service ────────────────────────────────────────────"
-# Its own slice, which keeps every CPU, so the measured child can be pinned
-# to CPU 2; the worker's own threads stay on the housekeeping core.
-cat > /etc/systemd/system/bench.slice <<'UNIT'
+# Its own slice, which keeps every online CPU, so the measured child can be
+# pinned to BENCH_CPU; the worker's own threads stay on the housekeeping core.
+cat > /etc/systemd/system/bench.slice <<UNIT
 [Slice]
-AllowedCPUs=0-3
+AllowedCPUs=$(cat /sys/devices/system/cpu/online)
 UNIT
-cat > /etc/systemd/system/cxxprobe-bencher.service <<'UNIT'
+cat > /etc/systemd/system/cxxprobe-bencher.service <<UNIT
 [Unit]
-Description=cxxprobe benchmark worker (one job at a time)
+Description=cxxprobe benchmark worker, one job at a time
 After=network-online.target
 Wants=network-online.target
 
@@ -95,7 +98,7 @@ Wants=network-online.target
 Type=simple
 User=root
 Slice=bench.slice
-CPUAffinity=0-1
+CPUAffinity=${HOUSEKEEPING//,/ }
 WorkingDirectory=/opt/cxxprobe-worker
 EnvironmentFile=/etc/cxxprobe-worker/secrets.env
 ExecStart=/usr/local/bin/uv run --frozen cxxprobe-worker run --env bench

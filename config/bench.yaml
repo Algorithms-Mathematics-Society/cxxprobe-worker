@@ -6,10 +6,11 @@
 # `role: bencher`) and only benchmark jobs, from its own queue, so judging
 # traffic can never share a machine with a measurement.
 #
-# The instance type is c7i.xlarge: 4 vCPU = 2 physical cores. The OS, IRQs
-# and this worker are confined to core 0 (CPUs 0-1) by bench-user-data.sh;
-# cxxprobe pins the measured process to CPU 2 and CPU 3, its hyperthread
-# sibling, is left idle. A 2-vCPU type (c7i.large, c7i-flex.large) is one
+# The instance type is c7i.xlarge: 4 vCPU = 2 physical cores, paired as
+# CPUs 0+2 and 1+3. The OS, IRQs and this worker are confined to CPU 0's
+# core by bench-user-data.sh; cxxprobe pins the measured process to CPU 1
+# and CPU 3, its hyperthread sibling, is left idle. The CPU below is
+# rewritten at boot from the actual topology. A 2-vCPU type (c7i.large, c7i-flex.large) is one
 # core plus its sibling and cannot keep the sibling idle while also running
 # the OS, which is why the pool does not use the judging fleet's type.
 environment: prod
@@ -27,11 +28,11 @@ bench:
   warmups: 1
   attempts: 3
   noise_threshold: 0.05
-  cpu: 2
+  cpu: 1
   profile: true
   timeout_seconds: 900
   # Set to the pool's measured calibration median once, after the first
-  # pool is up (`cxxprobe bench calibrate --cpu 2`), so every machine is held
+  # pool is up (`cxxprobe bench calibrate --cpu 1`), so every machine is held
   # to the same speed. Unset, each machine catches only its own drift.
   calibration_baseline_ns: null
   calibration_tolerance: 0.05
