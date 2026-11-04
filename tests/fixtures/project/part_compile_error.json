@@ -1,0 +1,163 @@
+{
+  "project": "The Order Desk",
+  "slug": "order-desk",
+  "overall": "ERROR",
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ingest",
+        "slug": "order-desk/1-ingest",
+        "submission": "/work/parts/1.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2-broken.cpp",
+      "status": "ERROR",
+      "report": {
+        "problem": "Book",
+        "slug": "order-desk/2-book",
+        "submission": "/work/parts/2-broken.cpp",
+        "overall": "ERROR",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "ERROR",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": false,
+            "exit_code": 1,
+            "diagnostics": "In file included from /work/round-2/order-desk/parts/2-book/checker/behavior_gtest.cpp:2:\n/work/parts/2-broken.cpp:1:1: error: expected unqualified-id before 'this'\n    1 | this is not C++\n      | ^~~~\nIn file included from /usr/include/c++/13/bits/char_traits.h:50,\n                 from /usr/include/c++/13/string:42,\n                 from /usr/include/c++/13/bits/locale_classes.h:40,\n                 from /usr/include/c++/13/bits/ios_base.h:41,\n                 from /usr/include/c++/13/iomanip:42,\n                 from /tmp/cxxprobe-gtest-2c44131411881b3d/include/gtest/gtest.h:54,\n                 from /work/round-2/order-desk/parts/2-book/checker/behavior_gtest.cpp:4:\n/usr/include/c++/13/type_traits:510:26: error: 'std::size_t' has not been declared\n  510 |   template<typename _Tp, std::size_t _Size>\n      |                          ^~~\n/usr/include/c++/13/type_traits:511:25: error: '_Size' was not declared in this scope\n  511 |     struct is_array<_Tp[_Size]>\n      |                         ^~~~~\n/usr/include/c++/13/type_traits:511:31: error: template argument 1 is invalid\n  511 |     struct is_array<_Tp[_Size]>\n      |                               ^\n/usr/include/c++/13/type_traits:617:33: error: 'nullptr_t' is not a member of 'std'; did you mean 'nullptr_t'?\n  617 |     struct is_null_pointer<std::nullptr_t>\n      |                                 ^~~~~~~~~\nIn file included from /usr/include/c++/13/cstddef:50,\n                 from /tmp/cxxprobe-gtest-2c44131411881b3d/in\n[... trimmed for the fixture ...]"
+          }
+        }
+      }
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ship",
+        "slug": "order-desk/3-ship",
+        "submission": "/work/parts/3.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    }
+  ],
+  "integration": {
+    "status": "ERROR",
+    "passed": 0,
+    "total": 0,
+    "cases": [],
+    "parts": [
+      {
+        "label": "1",
+        "slug": "order-desk/1-ingest",
+        "origin": "submission",
+        "source": "/work/parts/1.cpp",
+        "compiled": true
+      },
+      {
+        "label": "2",
+        "slug": "order-desk/2-book",
+        "origin": "submission",
+        "source": "/work/parts/2-broken.cpp",
+        "compiled": false,
+        "diagnostics": "/work/parts/2-broken.cpp:1:1: error: expected unqualified-id before 'this'\n    1 | this is not C++\n      | ^~~~\n"
+      },
+      {
+        "label": "3",
+        "slug": "order-desk/3-ship",
+        "origin": "submission",
+        "source": "/work/parts/3.cpp",
+        "compiled": true
+      }
+    ],
+    "error": "part(s) '2' failed to compile"
+  },
+  "substitutions": []
+}

@@ -154,7 +154,7 @@ class Job(BaseModel):
         if self.custom_cases is not None:
             raise ValueError("custom_cases is not supported on a project job")
         for label in [*self.parts, *(self.fallback or {})]:
-            if not PART_LABEL.match(label):
+            if not PART_LABEL.fullmatch(label):
                 raise ValueError(f"part label {label!r} is not a plain name")
         return self
 

@@ -42,8 +42,11 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from cxxprobe_worker import project_report
 from cxxprobe_worker.config import JudgeConfig
-from cxxprobe_worker.jobs import PART_LABEL, Job, JobResult, JobStatus
+from cxxprobe_worker.jobs import Job, JobResult, JobStatus
 from cxxprobe_worker.monitoring import Logger
 from cxxprobe_worker.storage import IArtifactStorage, StorageError
 from cxxprobe_worker.workspace import Workspace, WorkspaceManager
@@ -178,32 +181,26 @@ def _submission_crashed_at_runtime(report: dict[str, Any]) -> bool:
 def _project_failure(report: dict[str, Any]) -> str | None:
     """Why a project run that exited 2 is the submitters' fault, if it is.
 
-    Written against the report cxxprobe#6 describes: ``parts`` keyed by label,
-    each shaped like an ordinary judge report, and an ``integration`` block
-    whose ``compile`` step builds every part together. A part that will not
-    compile or crashes its own tests, or parts that compile alone but will
-    not link, fail identically on every worker, so retrying only burns the
-    queue. Returns the message to record, or ``None`` for a machine fault.
+    A part that will not compile or crashes its own tests, parts that compile
+    alone but will not link, or an integration binary that links and then
+    dies, fail identically on every worker, so retrying only burns the queue.
+    Returns the message to record, or ``None`` for a machine fault (a compile
+    or link step the sandbox never launched, a suite that could not start).
+    The report shape is read through ``project_report``.
     """
-    parts = report.get("parts")
-    if isinstance(parts, dict):
-        for label, part in sorted(parts.items()):
-            if not isinstance(part, dict):
-                continue
-            if _submission_failed_to_compile(part):
-                detail = _diagnostics_from(part)
-                return f"part {label} failed to compile: {detail}".rstrip(": ")
-            if _submission_crashed_at_runtime(part):
-                return f"part {label} crashed during testing"
+    for label, part in sorted(project_report.part_reports(report).items()):
+        if _submission_failed_to_compile(part):
+            detail = _diagnostics_from(part)
+            return f"part {label} failed to compile: {detail}".rstrip(": ")
+        if _submission_crashed_at_runtime(part):
+            return f"part {label} crashed during testing"
 
-    integration = report.get("integration")
-    if isinstance(integration, dict):
-        step = integration.get("compile")
-        if isinstance(step, dict) and step.get("ok") is False:
-            exit_code = step.get("exit_code")
-            if isinstance(exit_code, int) and exit_code >= 0:
-                detail = str(step.get("diagnostics") or "").strip()
-                return f"project parts failed to link: {detail}".rstrip(": ")
+    if project_report.link_rejected(report):
+        link = project_report.integration_link(report) or {}
+        detail = str(link.get("diagnostics") or "").strip()
+        return f"project parts failed to link: {detail}".rstrip(": ")
+    if project_report.suite_crashed(report):
+        return "project integration suite crashed during testing"
     return None
 
 
@@ -292,30 +289,12 @@ def _stage_parts(job: Job, workspace: Workspace, fetcher: Any = None) -> dict[st
     return staged
 
 
-def declared_part_labels(package: Path, project_slug: str) -> list[str] | None:
-    """The part labels a package declares for ``project_slug``.
-
-    Read from the pack's ``manifest.json`` (``projects[].parts[].label``),
-    which exists so a consumer need not open the project itself to learn its
-    shape. ``None`` when there is no readable declaration at all, which leaves
-    the decision to cxxprobe; ``[]`` when the package declares projects but
-    not this one.
-    """
+def _manifest_part_labels(raw: bytes, project_slug: str) -> list[str] | None:
+    """``projects[].parts[].label`` for ``project_slug`` from a pack manifest."""
     try:
-        if _is_zip(package):
-            with zipfile.ZipFile(package) as archive:
-                try:
-                    raw = archive.read("manifest.json")
-                except KeyError:
-                    return None
-        elif (package / "manifest.json").is_file():
-            raw = (package / "manifest.json").read_bytes()
-        else:
-            return None
         manifest = json.loads(raw)
-    except (OSError, zipfile.BadZipFile, ValueError):
+    except ValueError:
         return None
-
     projects = manifest.get("projects") if isinstance(manifest, dict) else None
     if not isinstance(projects, list):
         return None
@@ -326,27 +305,89 @@ def declared_part_labels(package: Path, project_slug: str) -> list[str] | None:
                 for part in project.get("parts") or []
                 if isinstance(part, dict) and part.get("label") is not None
             ]
-    return []
+    return None
+
+
+def _project_yaml_part_labels(contest: Path, project_slug: str) -> list[str] | None:
+    """``parts[].label`` from an authored project's own project.yaml.
+
+    A directory package is a contest directory as a setter wrote it, and has
+    no pack manifest; its project.yaml is the same declaration.
+    """
+    # The slug is a directory name inside the package; never a path.
+    if (
+        not project_slug
+        or "/" in project_slug
+        or "\\" in project_slug
+        or project_slug in {".", ".."}
+    ):
+        return None
+    try:
+        document = yaml.safe_load((contest / project_slug / "project.yaml").read_text("utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return None
+    parts = document.get("parts") if isinstance(document, dict) else None
+    if not isinstance(parts, list):
+        return None
+    # Labels must be YAML strings in the v1 contract; anything else is left
+    # for cxxprobe to reject with its own field diagnostic.
+    return [
+        part["label"]
+        for part in parts
+        if isinstance(part, dict) and isinstance(part.get("label"), str)
+    ]
+
+
+def declared_part_labels(package: Path, project_slug: str) -> list[str] | None:
+    """The part labels a package declares for ``project_slug``.
+
+    From the pack's ``manifest.json`` (``projects[].parts[].label``) for a
+    zip, and from the project's own ``project.yaml`` for a directory package,
+    which has no manifest. ``None`` when the package declares no such
+    project, which the caller refuses rather than leaving to cxxprobe: an
+    unverified project would have its missing parts filled with references.
+    """
+    try:
+        if _is_zip(package):
+            with zipfile.ZipFile(package) as archive:
+                try:
+                    return _manifest_part_labels(archive.read("manifest.json"), project_slug)
+                except KeyError:
+                    return None
+        if (package / "manifest.json").is_file():
+            labels = _manifest_part_labels((package / "manifest.json").read_bytes(), project_slug)
+            if labels is not None:
+                return labels
+        return _project_yaml_part_labels(package, project_slug)
+    except (OSError, zipfile.BadZipFile):
+        return None
 
 
 def _check_parts_against_package(job: Job, package: Path) -> None:
     """Refuse a project job whose parts don't match what the package declares.
 
-    Before any part is fetched. An unsupplied part is not harmless: cxxprobe
-    fills it with its reference, so a team missing a part would be graded as
-    though it had written one. A part may only be absent when the job names a
-    fallback for it.
+    Before any part is fetched, and the same for a zip and a directory. An
+    unsupplied part is not harmless: cxxprobe fills it with its reference, so
+    a team missing a part would be graded as though it had written one. A
+    part may only be absent when the job names a fallback for it, and a
+    package that does not declare the project at all cannot be checked, so it
+    is refused rather than trusted.
     """
     slug = job.project_slug or ""
     declared = declared_part_labels(package, slug)
-    if declared is None:
-        return
     if not declared:
-        raise PreparationError(f"package declares no project {slug!r}")
+        raise PreparationError(
+            f"package declares no parts for project {slug!r}; cannot verify part coverage"
+        )
     supplied = set(job.parts or {})
     unknown = sorted(supplied - set(declared))
     if unknown:
         raise PreparationError(f"project {slug!r} has no part labelled {', '.join(unknown)}")
+    unknown_fallback = sorted(set(job.fallback or {}) - set(declared))
+    if unknown_fallback:
+        raise PreparationError(
+            f"project {slug!r} has no part labelled {', '.join(unknown_fallback)} (fallback)"
+        )
     covered = supplied | set(job.fallback or {})
     missing = [label for label in declared if label not in covered]
     if missing:
@@ -410,7 +451,10 @@ def _stage_package(
         return "--package", staged
 
     if package.is_dir():
-        staged = workspace.package_dir
+        # Keep the package's own directory name: cxxprobe derives a problem's
+        # slug (and a contest's projects) from it, so staging into a fixed
+        # name would report every directory problem as `package`.
+        staged = workspace.package_dir / package.name
         try:
             shutil.copytree(package, staged, dirs_exist_ok=True)
         except OSError as exc:
@@ -732,7 +776,9 @@ class JobExecutor:
     def _persist_parts(self, job: Job, workspace: Workspace, result: JobResult) -> dict[str, str]:
         """Each part's source and compile output, keyed by its label.
 
-        So one person's build log can be fetched without everyone else's.
+        So one person's build log can be fetched without everyone else's. The
+        log holds the part's own compile steps and, when its source would not
+        build for the integration binary, that diagnostic too.
         """
         artifacts: dict[str, str] = {}
         for label in sorted(job.parts or {}):
@@ -740,23 +786,27 @@ class JobExecutor:
             if source.is_file():
                 name = f"parts/{label}/submission.cpp"
                 artifacts[name] = self._storage.put_file(job.job_id, name, source)
-        report_parts = (result.report or {}).get("parts")
-        if isinstance(report_parts, dict):
-            for label, part in sorted(report_parts.items()):
-                # The label comes from the report, not the validated job, and
-                # becomes part of a storage key.
-                if not PART_LABEL.match(str(label)):
-                    continue
-                if not isinstance(part, dict) or not isinstance(part.get("compile"), dict):
-                    continue
-                log = "\n\n".join(
+        report = result.report
+        if not project_report.is_project_report(report):
+            return artifacts
+        assert report is not None
+        integration_failures = project_report.integration_compile_failures(report)
+        for entry in project_report.part_entries(report):
+            label = entry["label"]
+            sections: list[str] = []
+            own = entry.get("report")
+            compile_steps = own.get("compile") if isinstance(own, dict) else None
+            if isinstance(compile_steps, dict):
+                sections += [
                     f"[{step}]\n{info['diagnostics']}"
-                    for step, info in part["compile"].items()
+                    for step, info in compile_steps.items()
                     if isinstance(info, dict) and str(info.get("diagnostics") or "").strip()
-                )
-                if log:
-                    name = f"parts/{label}/compile.log"
-                    artifacts[name] = self._storage.put_text(job.job_id, name, log)
+                ]
+            if integration_failures.get(label, "").strip():
+                sections.append(f"[integration]\n{integration_failures[label]}")
+            if sections:
+                name = f"parts/{label}/compile.log"
+                artifacts[name] = self._storage.put_text(job.job_id, name, "\n\n".join(sections))
         return artifacts
 
     def _judge_killed(

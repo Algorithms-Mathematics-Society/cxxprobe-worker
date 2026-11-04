@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from cxxprobe_worker import project_report
 from cxxprobe_worker.config import ControlPlaneConfig
 from cxxprobe_worker.executor import _diagnostics_from, _submission_failed_to_compile
 from cxxprobe_worker.jobs import JobResult, JobStatus
@@ -250,13 +251,14 @@ def _section_status(section: Any) -> str:
     return str(section.get("status") or "SKIPPED").upper()
 
 
-def _integration_verdict(integration: dict[str, Any]) -> str | None:
+def _integration_verdict(report: dict[str, Any]) -> str | None:
     """The integration check as a verdict, or ``None`` when it did not run.
 
     ``ERROR`` is cxxprobe's word for a compile or link failure as well as for
-    a machine fault; the compile step's exit code tells them apart, exactly as
+    a machine fault; the build step's exit code tells them apart, exactly as
     it does for a single submission.
     """
+    integration = project_report.integration(report)
     status = str(integration.get("status") or "").upper()
     if status in {"", "SKIPPED"}:
         return None
@@ -264,11 +266,10 @@ def _integration_verdict(integration: dict[str, Any]) -> str | None:
         return "AC"
     if status == "FAIL":
         return "WA"
-    step = integration.get("compile")
-    if isinstance(step, dict) and step.get("ok") is False:
-        exit_code = step.get("exit_code")
-        if isinstance(exit_code, int) and exit_code >= 0:
-            return "CE"
+    if project_report.link_rejected(report) or project_report.integration_compile_failures(report):
+        return "CE"
+    if project_report.suite_crashed(report):
+        return "RE"
     return "SE"
 
 
@@ -281,33 +282,53 @@ def _project(report: dict[str, Any]) -> dict[str, Any]:
     separate, because "my part passes alone" and "the parts do not work
     together" are two different facts and the consumer needs both.
 
-    The verdicts are cxxprobe's. Each part's block is an ordinary judge report
-    and goes through the same `summarise` as any submission; nothing here
-    re-decides whether a part passed.
+    The verdicts are cxxprobe's. Each part's ``report`` is an ordinary judge
+    report and goes through the same `summarise` as any submission; nothing
+    here re-decides whether a part passed. A part linked as ``empty`` was
+    never judged and has no verdict.
 
     The flat fields (`verdict`, `testcases`, ...) are still filled, from every
     part's cases tagged with their label, so a consumer that knows nothing of
     projects records a sensible row rather than an empty one.
     """
     substitutions = [
-        {"label": str(s.get("label")), "with": str(s.get("with") or s.get("fallback") or "")}
+        {
+            "label": str(s.get("label")),
+            "origin": str(s.get("origin") or ""),
+            "reason": str(s.get("reason") or ""),
+        }
         for s in report.get("substitutions") or []
         if isinstance(s, dict) and s.get("label") is not None
     ]
-    substituted = {s["label"]: s["with"] for s in substitutions}
+    substituted = {s["label"]: s["origin"] for s in substitutions}
 
     parts: dict[str, dict[str, Any]] = {}
     testcases: list[dict[str, Any]] = []
     verdicts: list[str] = []
     compile_output: list[str] = []
-    raw_parts = report.get("parts") or {}
-    for label, part in sorted(raw_parts.items()):
-        if not isinstance(part, dict):
+    for entry in project_report.part_entries(report):
+        label = entry["label"]
+        own = entry.get("report")
+        if not isinstance(own, dict):
+            parts[label] = {
+                "verdict": None,
+                "status": str(entry.get("status") or "SKIPPED").upper(),
+                "origin": str(entry.get("origin") or ""),
+                "manual": "SKIPPED",
+                "behavior": "SKIPPED",
+                "symbolic": "SKIPPED",
+                "passed_count": 0,
+                "total_count": 0,
+                "compile_output": "",
+                "substituted": substituted.get(label),
+            }
             continue
-        summary = summarise(part)
-        tests = part.get("tests") or {}
+        summary = summarise(own)
+        tests = own.get("tests") or {}
         parts[label] = {
             "verdict": summary["verdict"],
+            "status": str(entry.get("status") or own.get("overall") or "").upper(),
+            "origin": str(entry.get("origin") or ""),
             "manual": _section_status(tests.get("manual")),
             "behavior": _section_status(tests.get("behavior")),
             "symbolic": _section_status(tests.get("symbolic")),
@@ -323,32 +344,41 @@ def _project(report: dict[str, Any]) -> dict[str, Any]:
         for case in summary["testcases"]:
             testcases.append({**case, "part": label, "testcase_no": len(testcases) + 1})
 
-    raw_integration = report.get("integration")
-    integration_in = raw_integration if isinstance(raw_integration, dict) else {}
-    integration_verdict = _integration_verdict(integration_in)
-    # A failing integration case is pinned on a part when cxxprobe names one;
-    # the rest belongs to the project as a whole, not to whoever is listed
-    # first.
+    integration_in = project_report.integration(report)
+    integration_verdict = _integration_verdict(report)
+    # A failing integration case is pinned on every part whose label its name
+    # carries (cxxprobe's `parts`); the rest belongs to the project as a
+    # whole, not to whoever is listed first.
     attributed: dict[str, list[str]] = {}
     unattributed: list[str] = []
     for case in integration_in.get("cases") or []:
         if not isinstance(case, dict) or not case.get("failed"):
             continue
         name = str(case.get("name") or "")
-        owner = case.get("part")
-        if owner is not None and str(owner) in parts:
-            attributed.setdefault(str(owner), []).append(name)
-        else:
+        owners = [str(x) for x in case.get("parts") or [] if str(x) in parts]
+        for owner in owners:
+            attributed.setdefault(owner, []).append(name)
+        if not owners:
             unattributed.append(name)
-    integration_compile = integration_in.get("compile")
-    integration_diagnostics = (
-        str(integration_compile.get("diagnostics") or "")
-        if isinstance(integration_compile, dict)
-        else ""
-    )
+    for label in project_report.integration_compile_failures(report):
+        if label in parts:
+            attributed.setdefault(label, []).append("integration build")
+
+    link = project_report.integration_link(report) or {}
+    diagnostics = [
+        text
+        for text in (
+            str(integration_in.get("error") or "").strip(),
+            str(link.get("diagnostics") or "").strip() if link.get("ok") is False else "",
+        )
+        if text
+    ]
+    integration_diagnostics = "\n\n".join(diagnostics)
     integration = {
         "status": str(integration_in.get("status") or "SKIPPED").upper(),
         "verdict": integration_verdict,
+        "passed_count": int(integration_in.get("passed") or 0),
+        "total_count": int(integration_in.get("total") or 0),
         "failed_parts": attributed,
         "unattributed": unattributed,
         "diagnostics": integration_diagnostics[:20000],
@@ -359,11 +389,12 @@ def _project(report: dict[str, Any]) -> dict[str, Any]:
         compile_output.append(f"[integration]\n{integration_diagnostics}")
 
     failing_parts = sorted(
-        {label for label, part in parts.items() if part["verdict"] != "AC"} | set(attributed)
+        {label for label, part in parts.items() if part["verdict"] not in {None, "AC"}}
+        | set(attributed)
     )
 
     return {
-        "verdict": worst_verdict(verdicts),
+        "verdict": worst_verdict(verdicts) if verdicts else "SE",
         "passed_count": sum(1 for c in testcases if c["verdict"] == "AC"),
         "total_count": len(testcases),
         "max_runtime_ms": max((c["runtime_ms"] for c in testcases), default=0),
@@ -451,7 +482,7 @@ def summarise(
 
     # A project report has no top-level compile or tests: everything lives
     # under its parts and its integration block.
-    if isinstance(report.get("parts"), dict):
+    if project_report.is_project_report(report):
         return _project(report)
 
     compile_section = report.get("compile") or {}
