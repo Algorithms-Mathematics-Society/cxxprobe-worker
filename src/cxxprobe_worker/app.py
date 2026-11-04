@@ -80,8 +80,9 @@ def build_application(config: WorkerConfig) -> Application:
         packages = PackageCache(
             root=config.workspace.root.parent / "packages",
             ttl_seconds=config.judge.package_cache_seconds,
+            max_bytes=config.judge.package_cache_max_bytes,
         )
-        packages.prune()
+        packages.evict()
 
     executor = JobExecutor(
         config.judge, workspaces, storage, logger, fetcher=fetcher, packages=packages

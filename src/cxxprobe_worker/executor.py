@@ -224,7 +224,11 @@ def _stage_file(uri: str, destination: Path, fetcher: Any, what: str) -> None:
 
 
 def _stage_inputs(
-    job: Job, workspace: Workspace, fetcher: Any = None, cache: Any = None
+    job: Job,
+    workspace: Workspace,
+    fetcher: Any = None,
+    cache: Any = None,
+    outcome: dict[str, str] | None = None,
 ) -> tuple[str, Path]:
     """Bring the job's package and submission into its private workspace.
 
@@ -235,7 +239,7 @@ def _stage_inputs(
     if job.submission_path is None:
         raise PreparationError("problem job has no submission_path")
     _stage_file(job.submission_path, workspace.submission_path, fetcher, "submission")
-    return _stage_package(job, workspace, fetcher, cache)
+    return _stage_package(job, workspace, fetcher, cache, outcome)
 
 
 def _stage_parts(job: Job, workspace: Workspace, fetcher: Any = None) -> dict[str, Path]:
@@ -318,9 +322,19 @@ def _check_parts_against_package(job: Job, package: Path) -> None:
 
 
 def _stage_package(
-    job: Job, workspace: Workspace, fetcher: Any = None, cache: Any = None
+    job: Job,
+    workspace: Workspace,
+    fetcher: Any = None,
+    cache: Any = None,
+    outcome: dict[str, str] | None = None,
 ) -> tuple[str, Path]:
-    """Bring the job's package into its workspace, through the cache when remote."""
+    """Bring the job's package into its workspace, through the cache when remote.
+
+    ``outcome["package_cache"]`` is set to ``hit`` or ``miss`` when the cache
+    was consulted, so the result can say which this job was.
+    """
+    if outcome is None:
+        outcome = {}
     from cxxprobe_worker.aws.fetch import is_remote
 
     if is_remote(job.package_path):
@@ -336,13 +350,18 @@ def _stage_package(
         if cache is not None:
             cached = cache.fresh(job.package_path)
             if cached is not None:
-                cache.hits += 1
                 try:
                     shutil.copy2(cached, staged)
-                except OSError as exc:
-                    raise PreparationError(f"cannot stage cached package: {exc}") from exc
-                return "--package", staged
+                except OSError:
+                    # Evicted between the lookup and the copy, most likely by
+                    # another job's store. Not a reason to fail: fetch it.
+                    pass
+                else:
+                    cache.hits += 1
+                    outcome["package_cache"] = "hit"
+                    return "--package", staged
             cache.misses += 1
+            outcome["package_cache"] = "miss"
 
         fetched = _materialise(job.package_path, staged, fetcher)
         if cache is not None:
@@ -402,9 +421,12 @@ class JobExecutor:
             project=job.project_slug,
         )
 
+        outcome: dict[str, str] = {}
+        cache = self._packages
+        evictions_before = cache.evictions if cache is not None else 0
         try:
             with self._workspaces.session(job.job_id) as workspace:
-                result = self._run_in_workspace(job, workspace, started)
+                result = self._run_in_workspace(job, workspace, started, outcome)
         except PreparationError as exc:
             result = JobResult(
                 job_id=job.job_id,
@@ -422,11 +444,24 @@ class JobExecutor:
                 error=f"workspace unavailable: {exc}",
             )
 
-        cache = self._packages
+        looked_up = outcome.get("package_cache")
+        if looked_up is not None:
+            result.package_cache = "hit" if looked_up == "hit" else "miss"
+        if cache is not None and cache.evictions > evictions_before:
+            self._log.info(
+                "package_cache.evicted",
+                job_id=job.job_id,
+                removed=cache.evictions - evictions_before,
+                max_bytes=cache.max_bytes,
+            )
         self._log.info(
             "job.finish",
             job_id=job.job_id,
-            package_cached=(cache.hits if cache is not None else None),
+            # This job's own lookup, then the running totals, so the hit rate
+            # during a round can be read straight off the log.
+            package_cache=result.package_cache,
+            package_cache_hits=(cache.hits if cache is not None else None),
+            package_cache_misses=(cache.misses if cache is not None else None),
             status=result.status.value,
             exit_code=result.exit_code,
             duration_seconds=round(result.duration_seconds, 3),
@@ -434,11 +469,15 @@ class JobExecutor:
         )
         return result
 
-    def _run_in_workspace(self, job: Job, workspace: Workspace, started: float) -> JobResult:
+    def _run_in_workspace(
+        self, job: Job, workspace: Workspace, started: float, outcome: dict[str, str]
+    ) -> JobResult:
         if job.job_type == "project":
-            return self._run_project(job, workspace, started)
+            return self._run_project(job, workspace, started, outcome)
 
-        package_flag, package_path = _stage_inputs(job, workspace, self._fetcher, self._packages)
+        package_flag, package_path = _stage_inputs(
+            job, workspace, self._fetcher, self._packages, outcome
+        )
 
         argv = [
             self._judge.binary,
@@ -484,13 +523,17 @@ class JobExecutor:
             return completed
         return self._interpret(job, workspace, completed, started)
 
-    def _run_project(self, job: Job, workspace: Workspace, started: float) -> JobResult:
+    def _run_project(
+        self, job: Job, workspace: Workspace, started: float, outcome: dict[str, str]
+    ) -> JobResult:
         """Judge a project job: every part, then their integration, in one run.
 
         The worker never loops over parts itself. cxxprobe owns per-part and
         integration judging; this only hands it the sources by label.
         """
-        package_flag, package_path = _stage_package(job, workspace, self._fetcher, self._packages)
+        package_flag, package_path = _stage_package(
+            job, workspace, self._fetcher, self._packages, outcome
+        )
         _check_parts_against_package(job, package_path)
         staged = _stage_parts(job, workspace, self._fetcher)
 

@@ -149,6 +149,12 @@ class Worker:
             self._queue.release(lease)
             self._metrics.incr("jobs_crashed")
             return
+        # Into the health file's counters beside the job totals, so whether the
+        # cache did anything during a round is answerable afterwards.
+        if result.package_cache == "hit":
+            self._metrics.incr("package_cache_hits")
+        elif result.package_cache == "miss":
+            self._metrics.incr("package_cache_misses")
         self._handle_result(lease, result)
 
     def _check_in(self, running_jobs: int, *, force: bool = False) -> None:

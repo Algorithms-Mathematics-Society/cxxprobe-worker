@@ -184,6 +184,10 @@ class JobResult(BaseModel):
     artifacts: dict[str, str] = Field(default_factory=dict)
     """Artifact name → storage locator."""
 
+    package_cache: Literal["hit", "miss"] | None = None
+    """Whether this job's package came from the local cache. ``None`` when
+    the package was local and the cache never applied."""
+
     @property
     def ok(self) -> bool:
         return self.status is JobStatus.SUCCEEDED

@@ -56,6 +56,10 @@ class JudgeConfig(BaseModel):
     for why this is a TTL rather than an ETag check.
     """
 
+    package_cache_max_bytes: int = Field(default=1024**3, ge=0)
+    """Total size the package cache may reach before the oldest entries are
+    evicted. Zero leaves it bounded by age alone."""
+
 
 class WorkspaceConfig(BaseModel):
     """Where per-job scratch directories are created."""
