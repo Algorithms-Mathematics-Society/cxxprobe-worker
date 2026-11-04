@@ -142,3 +142,35 @@ the [worker recovery guide](../README.md#durable-callback-delivery-opt-in).
 Disabling production stops new saved callbacks but keeps existing marker and
 cached-source replay readers active. Keep the API token protocol, upgraded
 readers, storage permissions, and queue/DLQ send permissions during rollback.
+
+## The benchmark pool
+
+Benchmarking is not judging: a timing is only worth recording from an
+uncontended, homogeneous, calibrated machine, so the pool is separate from the
+judging fleet. `bench-pool.sh up N | down | status` manages it.
+
+- **One region, one zone, one type, on-demand.** `c7i.xlarge` in
+  `ap-south-1a`. The judging fleet's spread across regions and shared 2-vCPU
+  hosts is exactly what makes two timings incomparable. On-demand, because a
+  spot reclaim mid-benchmark is a lost measurement.
+- **A whole physical core for the measured process.** `c7i.xlarge` is 4 vCPUs
+  = 2 cores. `bench-isolate-cpus.sh` confines every systemd slice, every IRQ
+  and the kernel's unbound workqueues to CPUs 0-1; the bencher runs in its own
+  `bench.slice` with `CPUAffinity=0-1`, and cxxprobe pins the measured
+  process to CPU 2, so CPU 3, its sibling, has nothing scheduled on it. A
+  2-vCPU type cannot do this, which is why the pool does not reuse
+  `c7i-flex.large`.
+- **One benchmark at a time per machine.** `role: bencher` forces
+  `concurrency: 1`. Throughput comes from more machines: 20 teams iterating
+  every ten minutes for three hours is about 360 runs, which 2-4 machines
+  carry.
+- **Calibration.** Each bencher calibrates before claiming and periodically
+  after, and stops serving on drift. After the first pool is up, set
+  `bench.calibration_baseline_ns` in `config/bench.yaml` to the measured
+  median (`cxxprobe bench calibrate --cpu 2 --json`).
+- **Traceability.** `machine_id` is `<zone>/<type>/<instance-id>` and is
+  stored with every measurement.
+
+The pool needs a `benchmark` SQS queue and a cxxprobe release with
+`cxxprobe bench` (`CXXPROBE_VERSION` in `bench-user-data.sh`).
+
