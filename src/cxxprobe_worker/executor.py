@@ -8,7 +8,13 @@ or what a problem package contains. It knows one command:
             [--custom-cases FILE]
                    --submission FILE --output REPORT.json
 
-and one contract:
+and, for a project job, its sibling over an unpacked contest pack:
+
+    cxxprobe test project SLUG --dir CONTEST
+            --submission LABEL=FILE ...  [--fallback LABEL=reference|empty ...]
+            --json
+
+and one contract, shared by both:
 
     exit 0  → judged, everything passed
     exit 1  → judged, something failed (a real WA/TLE verdict)
@@ -29,12 +35,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import signal
 import subprocess
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from cxxprobe_worker import project_report
 from cxxprobe_worker.config import JudgeConfig
 from cxxprobe_worker.jobs import Job, JobResult, JobStatus
 from cxxprobe_worker.monitoring import Logger
@@ -43,6 +53,26 @@ from cxxprobe_worker.workspace import Workspace, WorkspaceManager
 
 # `cxxprobe judge` exit codes. 0 and 1 both mean "judging happened".
 JUDGED_EXIT_CODES = frozenset({0, 1})
+
+# Signals that kill cxxprobe *because of what it was running*: a submission
+# that stops reading its input (SIGPIPE, cxxprobe#1), or code that corrupts
+# memory badly enough to take the harness down with it. They recur on every
+# host, so they are the submission's runtime error, not a retry.
+#
+# Anything else that kills the judge (SIGKILL from the OOM killer or an
+# operator, SIGTERM on shutdown) comes from outside and is still retried.
+SUBMISSION_SIGNALS = frozenset(
+    {
+        signal.SIGPIPE,
+        signal.SIGSEGV,
+        signal.SIGABRT,
+        signal.SIGBUS,
+        signal.SIGFPE,
+        signal.SIGILL,
+        signal.SIGSYS,
+        signal.SIGTRAP,
+    }
+)
 
 # The `compile` steps in a cxxprobe report that build the submission itself.
 SUBMISSION_COMPILE_STEPS = ("solution", "behavior_binary")
@@ -148,6 +178,43 @@ def _submission_crashed_at_runtime(report: dict[str, Any]) -> bool:
     )
 
 
+def _project_failure(report: dict[str, Any]) -> str | None:
+    """Why a project run that exited 2 is the submitters' fault, if it is.
+
+    A part that will not compile or crashes its own tests, parts that compile
+    alone but will not link, or an integration binary that links and then
+    dies, fail identically on every worker, so retrying only burns the queue.
+    Returns the message to record, or ``None`` for a machine fault (a compile
+    or link step the sandbox never launched, a suite that could not start).
+    The report shape is read through ``project_report``.
+    """
+    for label, part in sorted(project_report.part_reports(report).items()):
+        if _submission_failed_to_compile(part):
+            detail = _diagnostics_from(part)
+            return f"part {label} failed to compile: {detail}".rstrip(": ")
+        if _submission_crashed_at_runtime(part):
+            return f"part {label} crashed during testing"
+
+    if project_report.link_rejected(report):
+        link = project_report.integration_link(report) or {}
+        detail = str(link.get("diagnostics") or "").strip()
+        return f"project parts failed to link: {detail}".rstrip(": ")
+    if project_report.suite_crashed(report):
+        return "project integration suite crashed during testing"
+    return None
+
+
+def signal_name(returncode: int) -> str | None:
+    """``SIGPIPE`` for -13: subprocess reports death by signal as a negative
+    exit code, which on its own (`exit -13`, no output) diagnoses nothing."""
+    if returncode >= 0:
+        return None
+    try:
+        return signal.Signals(-returncode).name
+    except ValueError:
+        return f"signal {-returncode}"
+
+
 def _is_zip(path: Path) -> bool:
     return path.is_file() and zipfile.is_zipfile(path)
 
@@ -172,8 +239,25 @@ def _materialise(uri: str, destination: Path, fetcher: Any) -> Path:
     return fetched
 
 
+def _stage_file(uri: str, destination: Path, fetcher: Any, what: str) -> None:
+    """Fetch or copy one source file to ``destination``."""
+    source = _materialise(uri, destination, fetcher)
+    if source == destination:
+        return
+    if not source.is_file():
+        raise PreparationError(f"{what} not found: {source}")
+    try:
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        raise PreparationError(f"cannot stage {what}: {exc}") from exc
+
+
 def _stage_inputs(
-    job: Job, workspace: Workspace, fetcher: Any = None, cache: Any = None
+    job: Job,
+    workspace: Workspace,
+    fetcher: Any = None,
+    cache: Any = None,
+    outcome: dict[str, str] | None = None,
 ) -> tuple[str, Path]:
     """Bring the job's package and submission into its private workspace.
 
@@ -181,16 +265,150 @@ def _stage_inputs(
     Copying (or downloading) rather than referencing in place means a job can
     never mutate shared state, and a retry starts from identical inputs.
     """
-    from cxxprobe_worker.aws.fetch import is_remote
+    if job.submission_path is None:
+        raise PreparationError("problem job has no submission_path")
+    _stage_file(job.submission_path, workspace.submission_path, fetcher, "submission")
+    return _stage_package(job, workspace, fetcher, cache, outcome)
 
-    submission_src = _materialise(job.submission_path, workspace.submission_path, fetcher)
-    if submission_src != workspace.submission_path:
-        if not submission_src.is_file():
-            raise PreparationError(f"submission not found: {submission_src}")
-        try:
-            shutil.copy2(submission_src, workspace.submission_path)
-        except OSError as exc:
-            raise PreparationError(f"cannot stage submission: {exc}") from exc
+
+def _stage_parts(job: Job, workspace: Workspace, fetcher: Any = None) -> dict[str, Path]:
+    """Bring every part of a project job into the one workspace, by label.
+
+    Through the same fetch path as an ordinary submission, so a part can be
+    a local file or an s3:// URI alike, and none of them is ever cached.
+    """
+    staged: dict[str, Path] = {}
+    try:
+        workspace.parts_dir.mkdir(exist_ok=True)
+    except OSError as exc:
+        raise PreparationError(f"cannot create parts directory: {exc}") from exc
+    for label, uri in sorted((job.parts or {}).items()):
+        destination = workspace.part_path(label)
+        _stage_file(uri, destination, fetcher, f"submission for part {label}")
+        staged[label] = destination
+    return staged
+
+
+def _manifest_part_labels(raw: bytes, project_slug: str) -> list[str] | None:
+    """``projects[].parts[].label`` for ``project_slug`` from a pack manifest."""
+    try:
+        manifest = json.loads(raw)
+    except ValueError:
+        return None
+    projects = manifest.get("projects") if isinstance(manifest, dict) else None
+    if not isinstance(projects, list):
+        return None
+    for project in projects:
+        if isinstance(project, dict) and project.get("slug") == project_slug:
+            return [
+                str(part["label"])
+                for part in project.get("parts") or []
+                if isinstance(part, dict) and part.get("label") is not None
+            ]
+    return None
+
+
+def _project_yaml_part_labels(contest: Path, project_slug: str) -> list[str] | None:
+    """``parts[].label`` from an authored project's own project.yaml.
+
+    A directory package is a contest directory as a setter wrote it, and has
+    no pack manifest; its project.yaml is the same declaration.
+    """
+    # The slug is a directory name inside the package; never a path.
+    if (
+        not project_slug
+        or "/" in project_slug
+        or "\\" in project_slug
+        or project_slug in {".", ".."}
+    ):
+        return None
+    try:
+        document = yaml.safe_load((contest / project_slug / "project.yaml").read_text("utf-8"))
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return None
+    parts = document.get("parts") if isinstance(document, dict) else None
+    if not isinstance(parts, list):
+        return None
+    # Labels must be YAML strings in the v1 contract; anything else is left
+    # for cxxprobe to reject with its own field diagnostic.
+    return [
+        part["label"]
+        for part in parts
+        if isinstance(part, dict) and isinstance(part.get("label"), str)
+    ]
+
+
+def declared_part_labels(package: Path, project_slug: str) -> list[str] | None:
+    """The part labels a package declares for ``project_slug``.
+
+    From the pack's ``manifest.json`` (``projects[].parts[].label``) for a
+    zip, and from the project's own ``project.yaml`` for a directory package,
+    which has no manifest. ``None`` when the package declares no such
+    project, which the caller refuses rather than leaving to cxxprobe: an
+    unverified project would have its missing parts filled with references.
+    """
+    try:
+        if _is_zip(package):
+            with zipfile.ZipFile(package) as archive:
+                try:
+                    return _manifest_part_labels(archive.read("manifest.json"), project_slug)
+                except KeyError:
+                    return None
+        if (package / "manifest.json").is_file():
+            labels = _manifest_part_labels((package / "manifest.json").read_bytes(), project_slug)
+            if labels is not None:
+                return labels
+        return _project_yaml_part_labels(package, project_slug)
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
+def _check_parts_against_package(job: Job, package: Path) -> None:
+    """Refuse a project job whose parts don't match what the package declares.
+
+    Before any part is fetched, and the same for a zip and a directory. An
+    unsupplied part is not harmless: cxxprobe fills it with its reference, so
+    a team missing a part would be graded as though it had written one. A
+    part may only be absent when the job names a fallback for it, and a
+    package that does not declare the project at all cannot be checked, so it
+    is refused rather than trusted.
+    """
+    slug = job.project_slug or ""
+    declared = declared_part_labels(package, slug)
+    if not declared:
+        raise PreparationError(
+            f"package declares no parts for project {slug!r}; cannot verify part coverage"
+        )
+    supplied = set(job.parts or {})
+    unknown = sorted(supplied - set(declared))
+    if unknown:
+        raise PreparationError(f"project {slug!r} has no part labelled {', '.join(unknown)}")
+    unknown_fallback = sorted(set(job.fallback or {}) - set(declared))
+    if unknown_fallback:
+        raise PreparationError(
+            f"project {slug!r} has no part labelled {', '.join(unknown_fallback)} (fallback)"
+        )
+    covered = supplied | set(job.fallback or {})
+    missing = [label for label in declared if label not in covered]
+    if missing:
+        raise PreparationError(f"project {slug!r} has no submission for part {', '.join(missing)}")
+
+
+def _stage_package(
+    job: Job,
+    workspace: Workspace,
+    fetcher: Any = None,
+    cache: Any = None,
+    outcome: dict[str, str] | None = None,
+) -> tuple[str, Path]:
+    """Bring the job's package into its workspace, through the cache when remote.
+
+    ``outcome["package_cache"]`` is set to ``hit`` or ``miss`` when the cache
+    was consulted, so the result can say which this job was.
+    """
+    if outcome is None:
+        outcome = {}
+    from cxxprobe_worker.aws.fetch import is_remote
 
     if is_remote(job.package_path):
         # A remote package is always a .cxxpkg zip; cxxprobe unpacks it.
@@ -199,19 +417,24 @@ def _stage_inputs(
         # *submission* for a handful of distinct packages, and on a fleet
         # spread across regions — which the account's quotas force — each of
         # those is a cross-region round trip costing more than the job. See
-        # packages.py. The submission below is never cached; it is different
+        # packages.py. Submissions are never cached; they are different
         # every time.
         staged = workspace.root / "package.zip"
         if cache is not None:
             cached = cache.fresh(job.package_path)
             if cached is not None:
-                cache.hits += 1
                 try:
                     shutil.copy2(cached, staged)
-                except OSError as exc:
-                    raise PreparationError(f"cannot stage cached package: {exc}") from exc
-                return "--package", staged
+                except OSError:
+                    # Evicted between the lookup and the copy, most likely by
+                    # another job's store. Not a reason to fail: fetch it.
+                    pass
+                else:
+                    cache.hits += 1
+                    outcome["package_cache"] = "hit"
+                    return "--package", staged
             cache.misses += 1
+            outcome["package_cache"] = "miss"
 
         fetched = _materialise(job.package_path, staged, fetcher)
         if cache is not None:
@@ -268,11 +491,20 @@ class JobExecutor:
     def execute(self, job: Job) -> JobResult:
         """Run one job to completion. Never raises for a job-level failure."""
         started = time.monotonic()
-        self._log.info("job.start", job_id=job.job_id, problem=job.problem_slug)
+        self._log.info(
+            "job.start",
+            job_id=job.job_id,
+            job_type=job.job_type,
+            problem=job.problem_slug,
+            project=job.project_slug,
+        )
 
+        outcome: dict[str, str] = {}
+        cache = self._packages
+        evictions_before = cache.evictions if cache is not None else 0
         try:
             with self._workspaces.session(job.job_id) as workspace:
-                result = self._run_in_workspace(job, workspace, started)
+                result = self._run_in_workspace(job, workspace, started, outcome)
         except PreparationError as exc:
             result = JobResult(
                 job_id=job.job_id,
@@ -290,11 +522,24 @@ class JobExecutor:
                 error=f"workspace unavailable: {exc}",
             )
 
-        cache = self._packages
+        looked_up = outcome.get("package_cache")
+        if looked_up is not None:
+            result.package_cache = "hit" if looked_up == "hit" else "miss"
+        if cache is not None and cache.evictions > evictions_before:
+            self._log.info(
+                "package_cache.evicted",
+                job_id=job.job_id,
+                removed=cache.evictions - evictions_before,
+                max_bytes=cache.max_bytes,
+            )
         self._log.info(
             "job.finish",
             job_id=job.job_id,
-            package_cached=(cache.hits if cache is not None else None),
+            # This job's own lookup, then the running totals, so the hit rate
+            # during a round can be read straight off the log.
+            package_cache=result.package_cache,
+            package_cache_hits=(cache.hits if cache is not None else None),
+            package_cache_misses=(cache.misses if cache is not None else None),
             status=result.status.value,
             exit_code=result.exit_code,
             duration_seconds=round(result.duration_seconds, 3),
@@ -302,8 +547,15 @@ class JobExecutor:
         )
         return result.model_copy(update={"attempt_token": job.attempt_token})
 
-    def _run_in_workspace(self, job: Job, workspace: Workspace, started: float) -> JobResult:
-        package_flag, package_path = _stage_inputs(job, workspace, self._fetcher, self._packages)
+    def _run_in_workspace(
+        self, job: Job, workspace: Workspace, started: float, outcome: dict[str, str]
+    ) -> JobResult:
+        if job.job_type == "project":
+            return self._run_project(job, workspace, started, outcome)
+
+        package_flag, package_path = _stage_inputs(
+            job, workspace, self._fetcher, self._packages, outcome
+        )
 
         argv = [
             self._judge.binary,
@@ -344,9 +596,76 @@ class JobExecutor:
         argv += self._judge.extra_args
         self._log.debug("judge.invoke", job_id=job.job_id, argv=argv)
 
+        completed = self._invoke(job, started, argv)
+        if isinstance(completed, JobResult):
+            return completed
+        return self._interpret(job, workspace, completed, started)
+
+    def _run_project(
+        self, job: Job, workspace: Workspace, started: float, outcome: dict[str, str]
+    ) -> JobResult:
+        """Judge a project job: every part, then their integration, in one run.
+
+        The worker never loops over parts itself. cxxprobe owns per-part and
+        integration judging; this only hands it the sources by label.
+        """
+        package_flag, package_path = _stage_package(
+            job, workspace, self._fetcher, self._packages, outcome
+        )
+        _check_parts_against_package(job, package_path)
+        staged = _stage_parts(job, workspace, self._fetcher)
+
+        if package_flag == "--package":
+            contest = workspace.contest_dir
+            unpacked = self._invoke(
+                job,
+                started,
+                [self._judge.binary, "package", "unpack", str(package_path), "--dir", str(contest)],
+            )
+            if isinstance(unpacked, JobResult):
+                return unpacked
+            if unpacked.returncode != 0:
+                detail = unpacked.stderr.strip() or unpacked.stdout.strip() or "(no output)"
+                raise PreparationError(f"cannot unpack project package: {detail}")
+        else:
+            contest = package_path
+
+        argv = [
+            self._judge.binary,
+            "test",
+            "project",
+            job.project_slug or "",
+            "--dir",
+            str(contest),
+        ]
+        for label, path in sorted(staged.items()):
+            argv += ["--submission", f"{label}={path}"]
+        for label, mode in sorted((job.fallback or {}).items()):
+            argv += ["--fallback", f"{label}={mode}"]
+        # No `extra_args`: they are flags for `cxxprobe judge`, which this
+        # subcommand may not accept.
+        argv.append("--json")
+        self._log.debug("judge.invoke", job_id=job.job_id, argv=argv)
+
+        completed = self._invoke(job, started, argv)
+        if isinstance(completed, JobResult):
+            return completed
+
+        # `test` prints its report rather than writing a file. Kept in the
+        # workspace under the usual name so everything downstream is shared.
         try:
-            # argv is built here from config and job paths — never shell-parsed.
-            completed = subprocess.run(
+            workspace.report_path.write_text(completed.stdout, encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("report.unwritable", job_id=job.job_id, error=str(exc))
+        return self._interpret(job, workspace, completed, started, stdout_is_report=True)
+
+    def _invoke(
+        self, job: Job, started: float, argv: list[str]
+    ) -> subprocess.CompletedProcess[str] | JobResult:
+        """Run one cxxprobe command, or say why it could not start."""
+        try:
+            # argv is built from config and job paths — never shell-parsed.
+            return subprocess.run(
                 argv,
                 capture_output=True,
                 text=True,
@@ -365,10 +684,8 @@ class JobExecutor:
                 job_id=job.job_id,
                 status=JobStatus.RETRYABLE,
                 duration_seconds=time.monotonic() - started,
-                error=f"cxxprobe judge exceeded {self._judge.timeout_seconds}s",
+                error=f"cxxprobe {argv[1]} exceeded {self._judge.timeout_seconds}s",
             )
-
-        return self._interpret(job, workspace, completed, started)
 
     def _interpret(
         self,
@@ -376,16 +693,22 @@ class JobExecutor:
         workspace: Workspace,
         completed: subprocess.CompletedProcess[str],
         started: float,
+        *,
+        stdout_is_report: bool = False,
     ) -> JobResult:
         duration = time.monotonic() - started
         report = self._read_report(workspace)
+        command = "test project" if job.job_type == "project" else "judge"
 
         # The exit code — not the presence of a report — decides whether
         # judging happened. cxxprobe exits 2 *and still writes a report* when
         # it could not judge (a broken sandbox, for instance, yields a report
         # whose overall is ERROR). Trusting the report there would record a
         # verdict for a submission that was never actually run.
-        if completed.returncode not in JUDGED_EXIT_CODES:
+        killed_by = signal_name(completed.returncode)
+        if killed_by is not None:
+            result = self._judge_killed(job, completed, duration, report, killed_by)
+        elif completed.returncode not in JUDGED_EXIT_CODES:
             detail = completed.stderr.strip() or completed.stdout.strip() or "(no output)"
             if report is not None:
                 detail = _diagnostics_from(report) or detail
@@ -396,9 +719,16 @@ class JobExecutor:
             # share of submissions are exactly this.
             would_not_compile = report is not None and _submission_failed_to_compile(report)
             crashed = report is not None and _submission_crashed_at_runtime(report)
-            submitter_at_fault = would_not_compile or crashed
+            project_fault = (
+                _project_failure(report)
+                if report is not None and job.job_type == "project"
+                else None
+            )
+            submitter_at_fault = would_not_compile or crashed or project_fault is not None
 
-            if would_not_compile:
+            if project_fault is not None:
+                message = project_fault
+            elif would_not_compile:
                 message = f"submission failed to compile: {detail}"
             elif crashed:
                 # Named distinctly from a compile failure because the remedy
@@ -406,7 +736,9 @@ class JobExecutor:
                 # memory-unsafe code that killed the test binary.
                 message = f"submission crashed during testing: {detail}"
             else:
-                message = f"cxxprobe judge could not judge (exit {completed.returncode}): {detail}"
+                message = (
+                    f"cxxprobe {command} could not judge (exit {completed.returncode}): {detail}"
+                )
 
             result = JobResult(
                 job_id=job.job_id,
@@ -425,7 +757,7 @@ class JobExecutor:
                 exit_code=completed.returncode,
                 duration_seconds=duration,
                 error=(
-                    f"cxxprobe judge exited {completed.returncode} without writing a report: "
+                    f"cxxprobe {command} exited {completed.returncode} without writing a report: "
                     f"{completed.stderr.strip() or completed.stdout.strip() or '(no output)'}"
                 ),
             )
@@ -438,8 +770,91 @@ class JobExecutor:
                 report=report,
             )
 
-        result.artifacts = self._persist(job, workspace, completed, result)
+        result.artifacts = self._persist(
+            job, workspace, completed, result, include_stdout=not stdout_is_report
+        )
         return result
+
+    def _persist_parts(self, job: Job, workspace: Workspace, result: JobResult) -> dict[str, str]:
+        """Each part's source and compile output, keyed by its label.
+
+        So one person's build log can be fetched without everyone else's. The
+        log holds the part's own compile steps and, when its source would not
+        build for the integration binary, that diagnostic too.
+        """
+        artifacts: dict[str, str] = {}
+        for label in sorted(job.parts or {}):
+            source = workspace.part_path(label)
+            if source.is_file():
+                name = f"parts/{label}/submission.cpp"
+                artifacts[name] = self._storage.put_file(job.job_id, name, source)
+        report = result.report
+        if not project_report.is_project_report(report):
+            return artifacts
+        assert report is not None
+        integration_failures = project_report.integration_compile_failures(report)
+        for entry in project_report.part_entries(report):
+            label = entry["label"]
+            sections: list[str] = []
+            own = entry.get("report")
+            compile_steps = own.get("compile") if isinstance(own, dict) else None
+            if isinstance(compile_steps, dict):
+                sections += [
+                    f"[{step}]\n{info['diagnostics']}"
+                    for step, info in compile_steps.items()
+                    if isinstance(info, dict) and str(info.get("diagnostics") or "").strip()
+                ]
+            if integration_failures.get(label, "").strip():
+                sections.append(f"[integration]\n{integration_failures[label]}")
+            if sections:
+                name = f"parts/{label}/compile.log"
+                artifacts[name] = self._storage.put_text(job.job_id, name, "\n\n".join(sections))
+        return artifacts
+
+    def _judge_killed(
+        self,
+        job: Job,
+        completed: subprocess.CompletedProcess[str],
+        duration: float,
+        report: dict[str, Any] | None,
+        name: str,
+    ) -> JobResult:
+        """cxxprobe itself died by signal: say whose fault that was.
+
+        A judge that could not start (no toolchain, no sandbox, no package)
+        exits 2 and never gets here. One killed by a signal was already
+        running the submission, and for the signals a submission causes it
+        dies identically on every attempt, so retrying spent the whole budget
+        and left the candidate with a job that looked lost. Those end now
+        with a terminal result naming the signal; the rest are retried.
+        """
+        by_submission = -completed.returncode in SUBMISSION_SIGNALS
+        detail = completed.stderr.strip() or completed.stdout.strip() or "(no output)"
+        self._log.warning(
+            "judge.killed_by_submission" if by_submission else "judge.killed_externally",
+            job_id=job.job_id,
+            signal=name,
+            exit_code=completed.returncode,
+            detail=detail[:500],
+        )
+        if by_submission:
+            return JobResult(
+                job_id=job.job_id,
+                status=JobStatus.FAILED,
+                exit_code=completed.returncode,
+                duration_seconds=duration,
+                report=report,
+                judge_signal=name,
+                error=f"the judge was killed by {name} while running this submission: {detail}",
+            )
+        return JobResult(
+            job_id=job.job_id,
+            status=JobStatus.RETRYABLE,
+            exit_code=completed.returncode,
+            duration_seconds=duration,
+            report=report,
+            error=f"the judge was killed by {name} from outside the job: {detail}",
+        )
 
     def _read_report(self, workspace: Workspace) -> dict[str, object] | None:
         if not workspace.report_path.is_file():
@@ -460,6 +875,8 @@ class JobExecutor:
         workspace: Workspace,
         completed: subprocess.CompletedProcess[str],
         result: JobResult,
+        *,
+        include_stdout: bool = True,
     ) -> dict[str, str]:
         """Store the report and the judge's own output.
 
@@ -473,7 +890,7 @@ class JobExecutor:
                 artifacts["report.json"] = self._storage.put_text(
                     job.job_id, "report.json", json.dumps(result.report, indent=2)
                 )
-            if completed.stdout:
+            if include_stdout and completed.stdout:
                 artifacts["stdout.log"] = self._storage.put_text(
                     job.job_id, "stdout.log", completed.stdout
                 )
@@ -485,6 +902,8 @@ class JobExecutor:
                 artifacts["submission.cpp"] = self._storage.put_file(
                     job.job_id, "submission.cpp", workspace.submission_path
                 )
+            if job.job_type == "project":
+                artifacts.update(self._persist_parts(job, workspace, result))
         except StorageError as exc:
             self._log.error("artifact.store_failed", job_id=job.job_id, error=str(exc))
         return artifacts

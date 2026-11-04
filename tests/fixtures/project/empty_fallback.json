@@ -1,0 +1,142 @@
+{
+  "project": "The Order Desk",
+  "slug": "order-desk",
+  "overall": "ERROR",
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ingest",
+        "slug": "order-desk/1-ingest",
+        "submission": "/work/parts/1.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "empty",
+      "source": "",
+      "status": "SKIPPED"
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ship",
+        "slug": "order-desk/3-ship",
+        "submission": "/work/parts/3.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    }
+  ],
+  "integration": {
+    "status": "ERROR",
+    "passed": 0,
+    "total": 0,
+    "cases": [],
+    "parts": [
+      {
+        "label": "1",
+        "slug": "order-desk/1-ingest",
+        "origin": "submission",
+        "source": "/work/parts/1.cpp",
+        "compiled": true
+      },
+      {
+        "label": "2",
+        "slug": "order-desk/2-book",
+        "origin": "empty",
+        "source": "",
+        "compiled": true
+      },
+      {
+        "label": "3",
+        "slug": "order-desk/3-ship",
+        "origin": "submission",
+        "source": "/work/parts/3.cpp",
+        "compiled": true
+      }
+    ],
+    "link": {
+      "ok": false,
+      "exit_code": 1,
+      "diagnostics": "/usr/bin/ld: /tmp/ccECQVcK.o: in function `Integration_Part2_Book_Test::TestBody()':\nintegration_gtest.cpp:(.text+0x172): undefined reference to `book(int)'\n/usr/bin/ld: /tmp/ccECQVcK.o: in function `Integration_EndToEnd_Test::TestBody()':\nintegration_gtest.cpp:(.text+0x2b9): undefined reference to `book(int)'\ncollect2: error: ld returned 1 exit status\n"
+    },
+    "error": "integration build failed; linked:\n  part '1' (submission): /work/parts/1.cpp\n  part '2' (empty): nothing linked\n  part '3' (submission): /work/parts/3.cpp"
+  },
+  "substitutions": [
+    {
+      "label": "2",
+      "origin": "empty",
+      "reason": "not supplied"
+    }
+  ]
+}

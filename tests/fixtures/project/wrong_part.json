@@ -1,0 +1,202 @@
+{
+  "project": "The Order Desk",
+  "slug": "order-desk",
+  "overall": "FAIL",
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ingest",
+        "slug": "order-desk/1-ingest",
+        "submission": "/work/parts/1.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2-wrong.cpp",
+      "status": "FAIL",
+      "report": {
+        "problem": "Book",
+        "slug": "order-desk/2-book",
+        "submission": "/work/parts/2-wrong.cpp",
+        "overall": "FAIL",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "FAIL",
+            "passed": 0,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": true,
+                "time_ms": 0,
+                "failure_messages": [
+                  "/work/round-2/order-desk/parts/2-book/checker/behavior_gtest.cpp:5\nExpected equality of these values:\n  book(1)\n    Which is: 1\n  6\n"
+                ]
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ship",
+        "slug": "order-desk/3-ship",
+        "submission": "/work/parts/3.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    }
+  ],
+  "integration": {
+    "status": "FAIL",
+    "passed": 1,
+    "total": 3,
+    "cases": [
+      {
+        "name": "Integration.Part1_Ingest",
+        "failed": false,
+        "time_ms": 0,
+        "parts": [
+          "1"
+        ]
+      },
+      {
+        "name": "Integration.Part2_Book",
+        "failed": true,
+        "time_ms": 0,
+        "parts": [
+          "2"
+        ],
+        "failure_messages": [
+          "/work/round-2/order-desk/integration/integration_gtest.cpp:4\nExpected equality of these values:\n  book(1)\n    Which is: 1\n  6\n"
+        ]
+      },
+      {
+        "name": "Integration.EndToEnd",
+        "failed": true,
+        "time_ms": 0,
+        "parts": [],
+        "failure_messages": [
+          "/work/round-2/order-desk/integration/integration_gtest.cpp:5\nExpected equality of these values:\n  ship(book(ingest(1)))\n    Which is: 1\n  6\n"
+        ]
+      }
+    ],
+    "parts": [
+      {
+        "label": "1",
+        "slug": "order-desk/1-ingest",
+        "origin": "submission",
+        "source": "/work/parts/1.cpp",
+        "compiled": true
+      },
+      {
+        "label": "2",
+        "slug": "order-desk/2-book",
+        "origin": "submission",
+        "source": "/work/parts/2-wrong.cpp",
+        "compiled": true
+      },
+      {
+        "label": "3",
+        "slug": "order-desk/3-ship",
+        "origin": "submission",
+        "source": "/work/parts/3.cpp",
+        "compiled": true
+      }
+    ],
+    "link": {
+      "ok": true,
+      "exit_code": 0
+    }
+  },
+  "substitutions": []
+}

@@ -41,6 +41,25 @@ class Workspace:
         return self.root / "submission.cpp"
 
     @property
+    def contest_dir(self) -> Path:
+        """Where a project job's contest pack is unpacked for cxxprobe."""
+        return self.root / "contest"
+
+    @property
+    def parts_dir(self) -> Path:
+        """A project job's part sources, one file per label."""
+        return self.root / "parts"
+
+    def part_path(self, label: str) -> Path:
+        """Where the submission for part ``label`` is staged.
+
+        Named by label so the executor can map each file back to the part it
+        implements. ``Job`` only admits labels that are plain names, so this
+        can never resolve outside the workspace.
+        """
+        return self.parts_dir / f"{label}.cpp"
+
+    @property
     def report_path(self) -> Path:
         """Where `cxxprobe judge --output` writes its JSON report."""
         return self.root / "report.json"

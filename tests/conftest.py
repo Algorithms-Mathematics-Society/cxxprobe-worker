@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,6 +21,46 @@ from cxxprobe_worker.monitoring import build_logger
 from cxxprobe_worker.queue import LocalJobQueue
 from cxxprobe_worker.storage import FilesystemArtifactStorage
 from cxxprobe_worker.workspace import WorkspaceManager
+
+# The engine release the fleet runs. The deploy script is the one place it is
+# pinned, so the tests read it from there rather than keeping a second copy
+# that can drift.
+_PIN_SOURCE = Path(__file__).parent.parent / "deploy" / "spot-user-data.sh"
+_PIN = re.compile(r'CXXPROBE_VERSION="\$\{CXXPROBE_VERSION:-([^}"]+)\}"')
+
+
+def _pinned_engine() -> str:
+    match = _PIN.search(_PIN_SOURCE.read_text(encoding="utf-8"))
+    return match.group(1) if match else "unknown"
+
+
+def _engine_under_test() -> str:
+    binary = os.environ.get("CXXPROBE_BINARY") or shutil.which("cxxprobe")
+    if not binary:
+        return "none (set CXXPROBE_BINARY; real-engine tests will skip)"
+    try:
+        out = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"{binary} (cannot run --version: {exc})"
+    return f"{binary} {(out.stdout or out.stderr).strip() or '(no version output)'}"
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Name the engine at the end of every run, CI included.
+
+    The report shape is cxxprobe's, and it changes between releases. When one
+    of those changes broke an assertion here it surfaced as a single puzzling
+    failure, with nothing in the output saying which engine the expectation
+    had been written against. A summary section rather than a report header,
+    because ``-q`` (set in ``addopts``) suppresses headers.
+    """
+    terminalreporter.section("cxxprobe engine")
+    terminalreporter.write_line(
+        f"pinned:     {_pinned_engine()} ({_PIN_SOURCE.relative_to(_PIN_SOURCE.parents[1])})"
+    )
+    terminalreporter.write_line(f"under test: {_engine_under_test()}")
 
 
 @pytest.fixture

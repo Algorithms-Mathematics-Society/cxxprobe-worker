@@ -182,6 +182,12 @@ class Worker:
             result = self._executor.execute(lease.job).model_copy(
                 update={"attempt_token": lease.job.attempt_token}
             )
+            # Into the health file's counters beside the job totals, so whether
+            # the cache did anything during a round is answerable afterwards.
+            if result.package_cache == "hit":
+                self._metrics.incr("package_cache_hits")
+            elif result.package_cache == "miss":
+                self._metrics.incr("package_cache_misses")
             result = self._give_up_if_last_delivery(lease, result)
             if produce and delivery is not None and not result.should_retry:
                 artifact, envelope = delivery.persist(lease, result)

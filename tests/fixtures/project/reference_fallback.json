@@ -1,0 +1,199 @@
+{
+  "project": "The Order Desk",
+  "slug": "order-desk",
+  "overall": "PASS",
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ingest",
+        "slug": "order-desk/1-ingest",
+        "submission": "/work/parts/1.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Book",
+        "slug": "order-desk/2-book",
+        "submission": "/work/parts/2.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "reference",
+      "source": "/work/round-2/order-desk/parts/3-ship/solutions/main.cpp",
+      "status": "PASS",
+      "report": {
+        "problem": "Ship",
+        "slug": "order-desk/3-ship",
+        "submission": "/work/round-2/order-desk/parts/3-ship/solutions/main.cpp",
+        "overall": "PASS",
+        "tests": {
+          "manual": {
+            "status": "SKIPPED",
+            "passed": 0,
+            "total": 0,
+            "cases": []
+          },
+          "symbolic": {
+            "status": "SKIPPED",
+            "checks": []
+          },
+          "behavior": {
+            "status": "PASS",
+            "passed": 1,
+            "total": 1,
+            "cases": [
+              {
+                "name": "Behavior.Own",
+                "failed": false,
+                "time_ms": 0
+              }
+            ]
+          }
+        },
+        "compile": {
+          "behavior_binary": {
+            "ok": true,
+            "exit_code": 0
+          }
+        }
+      }
+    }
+  ],
+  "integration": {
+    "status": "PASS",
+    "passed": 3,
+    "total": 3,
+    "cases": [
+      {
+        "name": "Integration.Part1_Ingest",
+        "failed": false,
+        "time_ms": 0,
+        "parts": [
+          "1"
+        ]
+      },
+      {
+        "name": "Integration.Part2_Book",
+        "failed": false,
+        "time_ms": 0,
+        "parts": [
+          "2"
+        ]
+      },
+      {
+        "name": "Integration.EndToEnd",
+        "failed": false,
+        "time_ms": 0,
+        "parts": []
+      }
+    ],
+    "parts": [
+      {
+        "label": "1",
+        "slug": "order-desk/1-ingest",
+        "origin": "submission",
+        "source": "/work/parts/1.cpp",
+        "compiled": true
+      },
+      {
+        "label": "2",
+        "slug": "order-desk/2-book",
+        "origin": "submission",
+        "source": "/work/parts/2.cpp",
+        "compiled": true
+      },
+      {
+        "label": "3",
+        "slug": "order-desk/3-ship",
+        "origin": "reference",
+        "source": "/work/round-2/order-desk/parts/3-ship/solutions/main.cpp",
+        "compiled": true
+      }
+    ],
+    "link": {
+      "ok": true,
+      "exit_code": 0
+    }
+  },
+  "substitutions": [
+    {
+      "label": "3",
+      "origin": "reference",
+      "reason": "not supplied"
+    }
+  ]
+}

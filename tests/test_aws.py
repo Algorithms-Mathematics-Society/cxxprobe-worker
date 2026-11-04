@@ -279,6 +279,7 @@ def test_s3_uri_survives_the_job_model():
     )
     assert job.package_path == "s3://ams-prod-objects/problems/p/v/package.cxxpkg"
     assert is_remote(job.package_path)
+    assert job.submission_path is not None
     assert parse_s3_uri(job.submission_path) == (
         "ams-prod-objects",
         "submissions/s/source.cpp",
