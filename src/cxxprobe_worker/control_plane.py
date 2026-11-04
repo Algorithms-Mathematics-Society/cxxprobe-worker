@@ -243,6 +243,146 @@ def _symbolic_cases(section: dict[str, Any], offset: int) -> tuple[list[dict[str
     return cases, verdicts
 
 
+def _section_status(section: Any) -> str:
+    """A check's own status word, or ``SKIPPED`` when the part has no such check."""
+    if not isinstance(section, dict):
+        return "SKIPPED"
+    return str(section.get("status") or "SKIPPED").upper()
+
+
+def _integration_verdict(integration: dict[str, Any]) -> str | None:
+    """The integration check as a verdict, or ``None`` when it did not run.
+
+    ``ERROR`` is cxxprobe's word for a compile or link failure as well as for
+    a machine fault; the compile step's exit code tells them apart, exactly as
+    it does for a single submission.
+    """
+    status = str(integration.get("status") or "").upper()
+    if status in {"", "SKIPPED"}:
+        return None
+    if status == "PASS":
+        return "AC"
+    if status == "FAIL":
+        return "WA"
+    step = integration.get("compile")
+    if isinstance(step, dict) and step.get("ok") is False:
+        exit_code = step.get("exit_code")
+        if isinstance(exit_code, int) and exit_code >= 0:
+            return "CE"
+    return "SE"
+
+
+def _project(report: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a `cxxprobe test project` report to what AMS records.
+
+    Selection in a team round is individual, so the one thing this must not
+    do is flatten: a person can only be judged on their own part. Each part
+    keeps its own verdict and per-check status; the integration result stays
+    separate, because "my part passes alone" and "the parts do not work
+    together" are two different facts and the consumer needs both.
+
+    The verdicts are cxxprobe's. Each part's block is an ordinary judge report
+    and goes through the same `summarise` as any submission; nothing here
+    re-decides whether a part passed.
+
+    The flat fields (`verdict`, `testcases`, ...) are still filled, from every
+    part's cases tagged with their label, so a consumer that knows nothing of
+    projects records a sensible row rather than an empty one.
+    """
+    substitutions = [
+        {"label": str(s.get("label")), "with": str(s.get("with") or s.get("fallback") or "")}
+        for s in report.get("substitutions") or []
+        if isinstance(s, dict) and s.get("label") is not None
+    ]
+    substituted = {s["label"]: s["with"] for s in substitutions}
+
+    parts: dict[str, dict[str, Any]] = {}
+    testcases: list[dict[str, Any]] = []
+    verdicts: list[str] = []
+    compile_output: list[str] = []
+    raw_parts = report.get("parts") or {}
+    for label, part in sorted(raw_parts.items()):
+        if not isinstance(part, dict):
+            continue
+        summary = summarise(part)
+        tests = part.get("tests") or {}
+        parts[label] = {
+            "verdict": summary["verdict"],
+            "manual": _section_status(tests.get("manual")),
+            "behavior": _section_status(tests.get("behavior")),
+            "symbolic": _section_status(tests.get("symbolic")),
+            "passed_count": summary["passed_count"],
+            "total_count": summary["total_count"],
+            "compile_output": summary["compile_output"],
+            # A substitution must never be invisible to whoever reads this.
+            "substituted": substituted.get(label),
+        }
+        verdicts.append(summary["verdict"])
+        if summary["compile_output"]:
+            compile_output.append(f"[part {label}]\n{summary['compile_output']}")
+        for case in summary["testcases"]:
+            testcases.append({**case, "part": label, "testcase_no": len(testcases) + 1})
+
+    raw_integration = report.get("integration")
+    integration_in = raw_integration if isinstance(raw_integration, dict) else {}
+    integration_verdict = _integration_verdict(integration_in)
+    # A failing integration case is pinned on a part when cxxprobe names one;
+    # the rest belongs to the project as a whole, not to whoever is listed
+    # first.
+    attributed: dict[str, list[str]] = {}
+    unattributed: list[str] = []
+    for case in integration_in.get("cases") or []:
+        if not isinstance(case, dict) or not case.get("failed"):
+            continue
+        name = str(case.get("name") or "")
+        owner = case.get("part")
+        if owner is not None and str(owner) in parts:
+            attributed.setdefault(str(owner), []).append(name)
+        else:
+            unattributed.append(name)
+    integration_compile = integration_in.get("compile")
+    integration_diagnostics = (
+        str(integration_compile.get("diagnostics") or "")
+        if isinstance(integration_compile, dict)
+        else ""
+    )
+    integration = {
+        "status": str(integration_in.get("status") or "SKIPPED").upper(),
+        "verdict": integration_verdict,
+        "failed_parts": attributed,
+        "unattributed": unattributed,
+        "diagnostics": integration_diagnostics[:20000],
+    }
+    if integration_verdict is not None:
+        verdicts.append(integration_verdict)
+    if integration_diagnostics:
+        compile_output.append(f"[integration]\n{integration_diagnostics}")
+
+    failing_parts = sorted(
+        {label for label, part in parts.items() if part["verdict"] != "AC"} | set(attributed)
+    )
+
+    return {
+        "verdict": worst_verdict(verdicts),
+        "passed_count": sum(1 for c in testcases if c["verdict"] == "AC"),
+        "total_count": len(testcases),
+        "max_runtime_ms": max((c["runtime_ms"] for c in testcases), default=0),
+        "max_memory_kb": max((c["memory_kb"] for c in testcases), default=0),
+        "compile_output": "\n\n".join(compile_output)[:20000],
+        "testcases": testcases,
+        "error": "",
+        "project": str(report.get("project") or ""),
+        "parts": parts,
+        "integration": integration,
+        "substitutions": substitutions,
+        "failing_parts": failing_parts,
+        # Set when the project failed but no single part can be blamed.
+        "project_failure": bool(
+            integration_verdict not in {None, "AC"} and not attributed and not failing_parts
+        ),
+    }
+
+
 def summarise(report: dict[str, Any] | None, error: str = "") -> dict[str, Any]:
     """Reduce a cxxprobe JudgeReport to what AMS records.
 
@@ -271,6 +411,11 @@ def summarise(report: dict[str, Any] | None, error: str = "") -> dict[str, Any]:
             "testcases": [],
             "error": error or "no report produced",
         }
+
+    # A project report has no top-level compile or tests: everything lives
+    # under its parts and its integration block.
+    if isinstance(report.get("parts"), dict):
+        return _project(report)
 
     compile_section = report.get("compile") or {}
     solution = compile_section.get("solution") or {}

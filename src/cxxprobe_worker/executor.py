@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from cxxprobe_worker.config import JudgeConfig
-from cxxprobe_worker.jobs import Job, JobResult, JobStatus
+from cxxprobe_worker.jobs import PART_LABEL, Job, JobResult, JobStatus
 from cxxprobe_worker.monitoring import Logger
 from cxxprobe_worker.storage import IArtifactStorage, StorageError
 from cxxprobe_worker.workspace import Workspace, WorkspaceManager
@@ -651,6 +651,36 @@ class JobExecutor:
         )
         return result
 
+    def _persist_parts(self, job: Job, workspace: Workspace, result: JobResult) -> dict[str, str]:
+        """Each part's source and compile output, keyed by its label.
+
+        So one person's build log can be fetched without everyone else's.
+        """
+        artifacts: dict[str, str] = {}
+        for label in sorted(job.parts or {}):
+            source = workspace.part_path(label)
+            if source.is_file():
+                name = f"parts/{label}/submission.cpp"
+                artifacts[name] = self._storage.put_file(job.job_id, name, source)
+        report_parts = (result.report or {}).get("parts")
+        if isinstance(report_parts, dict):
+            for label, part in sorted(report_parts.items()):
+                # The label comes from the report, not the validated job, and
+                # becomes part of a storage key.
+                if not PART_LABEL.match(str(label)):
+                    continue
+                if not isinstance(part, dict) or not isinstance(part.get("compile"), dict):
+                    continue
+                log = "\n\n".join(
+                    f"[{step}]\n{info['diagnostics']}"
+                    for step, info in part["compile"].items()
+                    if isinstance(info, dict) and str(info.get("diagnostics") or "").strip()
+                )
+                if log:
+                    name = f"parts/{label}/compile.log"
+                    artifacts[name] = self._storage.put_text(job.job_id, name, log)
+        return artifacts
+
     def _read_report(self, workspace: Workspace) -> dict[str, object] | None:
         if not workspace.report_path.is_file():
             return None
@@ -697,6 +727,8 @@ class JobExecutor:
                 artifacts["submission.cpp"] = self._storage.put_file(
                     job.job_id, "submission.cpp", workspace.submission_path
                 )
+            if job.job_type == "project":
+                artifacts.update(self._persist_parts(job, workspace, result))
         except StorageError as exc:
             self._log.error("artifact.store_failed", job_id=job.job_id, error=str(exc))
         return artifacts

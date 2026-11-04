@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from cxxprobe_worker.config import JudgeConfig
+from cxxprobe_worker.control_plane import summarise
 from cxxprobe_worker.executor import JobExecutor
 from cxxprobe_worker.jobs import Job, JobStatus
 
@@ -188,3 +189,76 @@ def test_a_problem_jobs_command_line_is_unchanged(tmp_path, workspaces, storage,
     assert words[3] == "--submission"
     assert words[5] == "--output"
     assert len(words) == 7
+
+
+# ── results: attribution to the part that caused a failure (#9) ──────────
+
+
+def _report(**overrides: Any) -> dict[str, Any]:
+    report: dict[str, Any] = json.loads(json.dumps(PASSING))
+    report.update(overrides)
+    return report
+
+
+def test_a_failing_part_is_named_and_the_others_keep_their_own_verdicts():
+    parts = {label: _part() for label in LABELS}
+    parts["3"] = _part("WA")
+    out = summarise(_report(overall="FAIL", parts=parts))
+
+    assert out["verdict"] == "WA"
+    assert out["failing_parts"] == ["3"]
+    assert out["parts"]["3"]["verdict"] == "WA"
+    assert out["parts"]["3"]["manual"] == "PASS"
+    assert all(out["parts"][x]["verdict"] == "AC" for x in LABELS if x != "3")
+    assert {c["part"] for c in out["testcases"]} == set(LABELS)
+    assert out["integration"]["verdict"] == "AC"
+    assert out["project_failure"] is False
+
+
+def test_an_integration_failure_no_part_owns_is_reported_against_the_project():
+    integration = {
+        "status": "FAIL",
+        "compile": {"ok": True, "exit_code": 0},
+        "cases": [{"name": "EndToEnd.Orders", "failed": True}],
+    }
+    out = summarise(_report(overall="FAIL", integration=integration))
+
+    assert out["verdict"] == "WA"
+    assert out["failing_parts"] == []
+    assert out["integration"]["unattributed"] == ["EndToEnd.Orders"]
+    assert out["project_failure"] is True
+    assert all(p["verdict"] == "AC" for p in out["parts"].values())
+
+
+def test_an_integration_failure_cxxprobe_attributes_lands_on_that_part():
+    integration = {
+        "status": "FAIL",
+        "cases": [{"name": "Part2.Booking", "failed": True, "part": "2"}],
+    }
+    out = summarise(_report(overall="FAIL", integration=integration))
+
+    assert out["failing_parts"] == ["2"]
+    assert out["integration"]["failed_parts"] == {"2": ["Part2.Booking"]}
+    assert out["project_failure"] is False
+
+
+def test_a_substituted_part_is_visible_in_the_result():
+    out = summarise(_report(substitutions=[{"label": "4", "with": "reference"}]))
+
+    assert out["substitutions"] == [{"label": "4", "with": "reference"}]
+    assert out["parts"]["4"]["substituted"] == "reference"
+    assert out["parts"]["1"]["substituted"] is None
+
+
+def test_part_artifacts_are_keyed_by_label(tmp_path, workspaces, storage, logger):
+    contest, parts = make_project(tmp_path)
+    report = _report()
+    report["parts"]["2"]["compile"]["solution"]["diagnostics"] = "warning: unused variable"
+    binary, _ = fake_engine(tmp_path, report)
+
+    result = executor_for(binary, workspaces, storage, logger).execute(project_job(contest, parts))
+
+    for label in LABELS:
+        assert f"parts/{label}/submission.cpp" in result.artifacts
+    assert "unused variable" in Path(result.artifacts["parts/2/compile.log"]).read_text()
+    assert "parts/1/compile.log" not in result.artifacts
