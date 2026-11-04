@@ -21,6 +21,7 @@ from types import FrameType
 from pydantic import ValidationError
 
 from cxxprobe_worker import __version__
+from cxxprobe_worker.bench import Calibrator
 from cxxprobe_worker.config import WorkerConfig
 from cxxprobe_worker.control_plane import IControlPlane
 from cxxprobe_worker.delivery import DeliveryState, ResultDelivery
@@ -44,6 +45,7 @@ class Worker:
         health: HealthReporter,
         control_plane: IControlPlane | None = None,
         storage: IArtifactStorage | None = None,
+        calibrator: Calibrator | None = None,
     ) -> None:
         self._config = config
         self._queue = queue
@@ -59,6 +61,7 @@ class Worker:
         )
         if config.result_delivery_enabled and self._delivery is None:
             raise ValueError("durable result delivery requires storage and a control plane")
+        self._calibrator = calibrator
         self._stopping = threading.Event()
         self._jobs_claimed = 0
         # Monotonic; -inf so the first check-in always fires.
@@ -215,7 +218,45 @@ class Worker:
         else:
             return result
 
+    def _misrouted(self, lease: Lease) -> bool:
+        """A judge never times and a bencher never judges. A job for the
+        other role goes back on the queue untouched, for a worker that can
+        run it; the queues should keep them apart in the first place."""
+        is_bench = lease.job.job_type == "benchmark"
+        if is_bench == (self._config.role == "bencher"):
+            return False
+        self._log.error(
+            "job.misrouted",
+            job_id=lease.job.job_id,
+            job_type=lease.job.job_type,
+            role=self._config.role,
+        )
+        try:
+            self._queue.release(lease)
+        except QueueError as exc:
+            self._log.error("queue.finalize_failed", job_id=lease.job.job_id, error=str(exc))
+        self._metrics.incr("jobs_misrouted")
+        self._sleep_between_polls()
+        return True
+
+    def _healthy_to_claim(self) -> bool:
+        """A bencher whose calibration has drifted stops claiming, says why
+        in its health file, and re-checks on the calibration schedule."""
+        if self._calibrator is None:
+            return True
+        now = time.monotonic()
+        if self._calibrator.due(now):
+            self._calibrator.run(now)
+        if self._calibrator.state.ok:
+            return True
+        self._health.write(f"unhealthy: {self._calibrator.state.reason}")
+        self._metrics.incr("calibration_refusals")
+        self._sleep_between_polls()
+        return False
+
     def _run_one(self, lease: Lease) -> None:
+        if self._misrouted(lease):
+            return
         try:
             self._process_lease(lease)
         except Exception as exc:  # a job must never take the worker down
@@ -273,6 +314,9 @@ class Worker:
                     time.sleep(min(self._config.queue.poll_interval_seconds, 0.05))
                     continue
 
+                if not self._healthy_to_claim():
+                    continue
+
                 try:
                     lease = self._queue.claim()
                 except QueueError as exc:
@@ -307,6 +351,8 @@ class Worker:
     def run_once(self) -> JobResult | None:
         """Claim and run at most one job, then return. Used by ``--once``."""
         self._check_in(0, force=True)
+        if not self._healthy_to_claim():
+            return None
         try:
             lease = self._queue.claim()
         except QueueError as exc:
@@ -316,6 +362,8 @@ class Worker:
             return None
 
         self._metrics.incr("jobs_claimed")
+        if self._misrouted(lease):
+            return None
         return self._process_lease(lease)
 
     def _sleep_between_polls(self) -> None:

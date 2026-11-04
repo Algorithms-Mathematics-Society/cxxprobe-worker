@@ -1,0 +1,43 @@
+{
+  "result": {
+    "status": "FAILED_VERIFY",
+    "median_ns": null,
+    "iqr_ns": null,
+    "instructions": null,
+    "repetitions": 0,
+    "pinned_core": 3
+  },
+  "verify_reason": "output differs from the reference on the benchmark input",
+  "input_sha256": "1c5af8f01d1a699dafee1845343733af9390097bcaf27a3af56fb060ded9406d",
+  "binary_sha256": "343a91896d41ff1914cb20ef435bee202d0a0a06fe59c866c040e0c059aa5099",
+  "cpu": {
+    "cpu": 3,
+    "siblings": [],
+    "reserved_core_free": true
+  },
+  "attempts": [],
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "compiled": true
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2-wrong.cpp",
+      "compiled": true
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "compiled": true
+    }
+  ],
+  "project": "order-desk"
+}

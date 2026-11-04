@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from cxxprobe_worker import project_report
+from cxxprobe_worker.bench import summarise_benchmark
 from cxxprobe_worker.config import ControlPlaneConfig
 from cxxprobe_worker.executor import _diagnostics_from, _submission_failed_to_compile
 from cxxprobe_worker.jobs import JobResult, JobStatus
@@ -488,6 +489,8 @@ def summarise(
     # under its parts and its integration block.
     if project_report.is_project_report(report):
         return _project(report)
+    if isinstance(report.get("result"), dict) and "provenance" in report:
+        return summarise_benchmark(report, error)
 
     compile_section = report.get("compile") or {}
     solution = compile_section.get("solution") or {}

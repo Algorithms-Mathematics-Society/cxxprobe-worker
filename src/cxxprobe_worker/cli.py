@@ -140,6 +140,30 @@ def recover_result(
 
 
 @app.command()
+def cancel(
+    job_id: Annotated[str, typer.Argument(help="The benchmark job to cancel")],
+    env: EnvOption = "test",
+    config_dir: ConfigDirOption = Path("config"),
+) -> None:
+    """Cancel a queued benchmark job: any bencher that claims it refuses it.
+
+    For a superseded revision, prefer enqueueing the newer one: a job older
+    than its team's newest benchmarked revision is refused on its own.
+    """
+    from cxxprobe_worker.bench import BenchGuard
+    from cxxprobe_worker.storage import StorageError
+
+    config = _load(env, config_dir)
+    application = build_application(config)
+    try:
+        BenchGuard(application.storage, config.bench).cancel(job_id)
+    except StorageError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"cancelled {job_id}")
+
+
+@app.command()
 def status(
     env: EnvOption = "test",
     config_dir: ConfigDirOption = Path("config"),

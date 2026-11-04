@@ -1,0 +1,109 @@
+{
+  "result": {
+    "status": "OK",
+    "median_ns": 110576541.0,
+    "iqr_ns": 7853770.5,
+    "instructions": null,
+    "repetitions": 7,
+    "pinned_core": 3
+  },
+  "input_sha256": "1c5af8f01d1a699dafee1845343733af9390097bcaf27a3af56fb060ded9406d",
+  "binary_sha256": "0edfbf43019de50e1916aea83fbea03b0defb941b1bf1697e889b1617bb38a61",
+  "cpu": {
+    "cpu": 3,
+    "siblings": [],
+    "reserved_core_free": true
+  },
+  "attempts": [
+    {
+      "median_ns": 110576541.0,
+      "iqr_ns": 7853770.5,
+      "relative_iqr": 0.07102564819783973,
+      "wall_ns": [
+        112707283,
+        110576541,
+        115086501,
+        102434599,
+        119218559,
+        103000160,
+        109086083
+      ],
+      "instructions": null
+    }
+  ],
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "compiled": true
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2.cpp",
+      "compiled": true
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "compiled": true
+    }
+  ],
+  "profile": {
+    "samples": 613,
+    "folded": "/work/profile/stacks.folded",
+    "svg": "/work/profile/flamegraph.svg",
+    "owners": [
+      {
+        "owner": "1",
+        "samples": 594,
+        "share": 0.9690048939641109,
+        "top_symbols": [
+          {
+            "symbol": "ingest(int)",
+            "samples": 594
+          }
+        ]
+      },
+      {
+        "owner": "entry",
+        "samples": 11,
+        "share": 0.01794453507340946,
+        "top_symbols": [
+          {
+            "symbol": "main",
+            "samples": 11
+          }
+        ]
+      },
+      {
+        "owner": "other",
+        "samples": 7,
+        "share": 0.011419249592169658,
+        "top_symbols": [
+          {
+            "symbol": "[external]",
+            "samples": 7
+          }
+        ]
+      },
+      {
+        "owner": "2",
+        "samples": 1,
+        "share": 0.0016313213703099511,
+        "top_symbols": [
+          {
+            "symbol": "book(int)",
+            "samples": 1
+          }
+        ]
+      }
+    ]
+  },
+  "project": "order-desk"
+}

@@ -1,0 +1,65 @@
+{
+  "result": {
+    "status": "NOISY",
+    "median_ns": 111541694.0,
+    "iqr_ns": 12912267.0,
+    "instructions": null,
+    "repetitions": 7,
+    "pinned_core": 3
+  },
+  "noise_reason": "the host drifted 25409682.5% from its calibration baseline around the measurement (tolerance 5.0%)",
+  "host": {
+    "baseline_ns": 1000.0,
+    "before_ns": 254097825.0,
+    "after_ns": 210168254.0,
+    "drift": 254096.825
+  },
+  "input_sha256": "1c5af8f01d1a699dafee1845343733af9390097bcaf27a3af56fb060ded9406d",
+  "binary_sha256": "fe84935997e45b671070a65662b70cc75e011bdffd6ad2338169a7fab665f0ae",
+  "cpu": {
+    "cpu": 3,
+    "siblings": [],
+    "reserved_core_free": true
+  },
+  "attempts": [
+    {
+      "median_ns": 111541694.0,
+      "iqr_ns": 12912267.0,
+      "relative_iqr": 0.11576179755706417,
+      "wall_ns": [
+        111328110,
+        111541694,
+        108015457,
+        125895503,
+        146833254,
+        119272598,
+        106523067
+      ],
+      "instructions": null
+    }
+  ],
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "compiled": true
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2.cpp",
+      "compiled": true
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "compiled": true
+    }
+  ],
+  "project": "order-desk"
+}

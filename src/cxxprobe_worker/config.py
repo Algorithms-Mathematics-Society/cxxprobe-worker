@@ -187,6 +187,46 @@ class ControlPlaneConfig(BaseModel):
     timeout_seconds: float = Field(default=30.0, gt=0)
 
 
+class BenchConfig(BaseModel):
+    """How a bencher measures, and what it treats as a healthy machine.
+
+    The measurement settings are passed straight to ``cxxprobe bench``; see
+    cxxprobe's schemas/benchmark-result.md for what each one means.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    repetitions: int = Field(default=7, ge=2)
+    warmups: int = Field(default=1, ge=0)
+    warmup_ms: int = Field(default=1000, ge=0)
+    """Discarded runs last at least this long; one run does not settle a host
+    that has just compiled the parts."""
+    attempts: int = Field(default=3, ge=1)
+    noise_threshold: float = Field(default=0.05, gt=0)
+    cpu: int = -1
+    """Logical CPU to pin to; -1 lets cxxprobe choose a core off CPU 0's."""
+
+    profile: bool = True
+    """Upload a flamegraph and folded stacks with every OK result."""
+
+    timeout_seconds: float = Field(default=900.0, gt=0)
+
+    calibration_baseline_ns: float | None = Field(default=None, gt=0)
+    """The pool's shared expected calibration median. Unset, the first
+    calibration on each machine becomes its own baseline."""
+
+    calibration_tolerance: float = Field(default=0.05, gt=0)
+    calibration_every_seconds: float = Field(default=900.0, gt=0)
+    calibration_every_jobs: int = Field(default=10, ge=1)
+
+    min_team_interval_seconds: float = Field(default=300.0, ge=0)
+    """Shortest gap between two benchmarks of one team; zero disables. The
+    pool is small and uncontended by design, so no team may monopolise it."""
+
+    machine_id: str = ""
+    """Recorded with every measurement. Empty uses ``worker_id``."""
+
+
 class MonitoringConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -206,6 +246,10 @@ class WorkerConfig(BaseModel):
 
     environment: Environment = "test"
     worker_id: str = "worker-1"
+    role: Literal["judge", "bencher"] = "judge"
+    """A worker either judges or benchmarks, never both. A bencher runs
+    exactly one job at a time and only benchmark jobs: the uncontended
+    machine is the whole point."""
     concurrency: int = Field(default=1, ge=1)
     """Jobs run in parallel.
 
@@ -228,10 +272,17 @@ class WorkerConfig(BaseModel):
     aws: AwsConfig = Field(default_factory=AwsConfig)
     control_plane: ControlPlaneConfig = Field(default_factory=ControlPlaneConfig)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
+    bench: BenchConfig = Field(default_factory=BenchConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+
+    @model_validator(mode="after")
+    def _bencher_runs_alone(self) -> Self:
+        if self.role == "bencher" and self.concurrency != 1:
+            raise ValueError("a bencher runs one job at a time: concurrency must be 1")
+        return self
 
     @field_validator("worker_id")
     @classmethod

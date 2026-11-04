@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from cxxprobe_worker.bench import BenchGuard, Calibrator
 from cxxprobe_worker.config import WorkerConfig
 from cxxprobe_worker.control_plane import ControlPlaneClient
 from cxxprobe_worker.daemon import Worker
@@ -91,8 +92,24 @@ def build_application(config: WorkerConfig) -> Application:
         )
         packages.evict()
 
+    # A bencher calibrates its machine and coordinates with the rest of the
+    # pool through storage markers; a judge needs neither.
+    calibrator = None
+    guard = None
+    if config.role == "bencher":
+        calibrator = Calibrator(config.judge.binary, config.bench, logger)
+        guard = BenchGuard(storage, config.bench)
     executor = JobExecutor(
-        config.judge, workspaces, storage, logger, fetcher=fetcher, packages=packages
+        config.judge,
+        workspaces,
+        storage,
+        logger,
+        fetcher=fetcher,
+        packages=packages,
+        bench=config.bench,
+        bench_guard=guard,
+        calibrator=calibrator,
+        machine_id=config.bench.machine_id or config.worker_id,
     )
 
     control_plane = ControlPlaneClient(config.control_plane, logger)
@@ -105,6 +122,7 @@ def build_application(config: WorkerConfig) -> Application:
         health,
         control_plane=control_plane,
         storage=storage,
+        calibrator=calibrator,
     )
 
     return Application(

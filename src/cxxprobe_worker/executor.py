@@ -33,6 +33,7 @@ properties of the machine rather than of the job.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import signal
@@ -45,7 +46,8 @@ from typing import Any
 import yaml
 
 from cxxprobe_worker import project_report
-from cxxprobe_worker.config import JudgeConfig
+from cxxprobe_worker.bench import BenchGuard, Calibrator
+from cxxprobe_worker.config import BenchConfig, JudgeConfig
 from cxxprobe_worker.jobs import Job, JobResult, JobStatus
 from cxxprobe_worker.monitoring import Logger
 from cxxprobe_worker.storage import IArtifactStorage, StorageError
@@ -477,8 +479,16 @@ class JobExecutor:
         logger: Logger,
         fetcher: Any = None,
         packages: Any = None,
+        bench: BenchConfig | None = None,
+        bench_guard: BenchGuard | None = None,
+        calibrator: Calibrator | None = None,
+        machine_id: str = "",
     ) -> None:
         self._judge = judge
+        self._bench = bench or BenchConfig()
+        self._guard = bench_guard
+        self._calibrator = calibrator
+        self._machine_id = machine_id
         self._workspaces = workspaces
         self._storage = storage
         self._log = logger
@@ -552,6 +562,8 @@ class JobExecutor:
     ) -> JobResult:
         if job.job_type == "project":
             return self._run_project(job, workspace, started, outcome)
+        if job.job_type == "benchmark":
+            return self._run_benchmark(job, workspace, started, outcome)
 
         package_flag, package_path = _stage_inputs(
             job, workspace, self._fetcher, self._packages, outcome
@@ -659,8 +671,219 @@ class JobExecutor:
             self._log.warning("report.unwritable", job_id=job.job_id, error=str(exc))
         return self._interpret(job, workspace, completed, started, stdout_is_report=True)
 
+    def _benchmark_refused(self, job: Job, started: float, reason: str) -> JobResult:
+        self._log.warning("bench.refused", job_id=job.job_id, team=job.team_id, reason=reason)
+        return JobResult(
+            job_id=job.job_id,
+            status=JobStatus.FAILED,
+            duration_seconds=time.monotonic() - started,
+            error=reason,
+        )
+
+    def _run_benchmark(
+        self, job: Job, workspace: Workspace, started: float, outcome: dict[str, str]
+    ) -> JobResult:
+        """Verify on the benchmark input, then time that same binary.
+
+        cxxprobe does both in one run (`bench project`), building the parts
+        once, so the verified artifact is the timed one. This adds what only
+        the worker knows: the machine, its calibration, the input's content
+        hash and the revision, and the refusals that keep a stale, cancelled
+        or monopolising job from costing the pool a measurement.
+        """
+        guard = self._guard
+        if guard is not None and (reason := guard.refusal(job)) is not None:
+            return self._benchmark_refused(job, started, reason)
+        calibration = self._calibrator.state if self._calibrator is not None else None
+        if calibration is not None and not calibration.ok:
+            # Not this job's fault: another bencher may be healthy.
+            return JobResult(
+                job_id=job.job_id,
+                status=JobStatus.RETRYABLE,
+                duration_seconds=time.monotonic() - started,
+                error=f"bencher unhealthy: {calibration.reason}",
+            )
+
+        package_flag, package_path = _stage_package(
+            job, workspace, self._fetcher, self._packages, outcome
+        )
+        _check_parts_against_package(job, package_path)
+        staged = _stage_parts(job, workspace, self._fetcher)
+        bench_input = workspace.root / "benchmark-input"
+        _stage_file(job.benchmark_input or "", bench_input, self._fetcher, "benchmark input")
+        try:
+            input_hash = hashlib.sha256(bench_input.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise PreparationError(f"cannot read benchmark input: {exc}") from exc
+
+        if package_flag == "--package":
+            contest = workspace.contest_dir
+            unpacked = self._invoke(
+                job,
+                started,
+                [self._judge.binary, "package", "unpack", str(package_path), "--dir", str(contest)],
+            )
+            if isinstance(unpacked, JobResult):
+                return unpacked
+            if unpacked.returncode != 0:
+                detail = unpacked.stderr.strip() or unpacked.stdout.strip() or "(no output)"
+                raise PreparationError(f"cannot unpack project package: {detail}")
+        else:
+            contest = package_path
+
+        if guard is not None:
+            guard.started(job)
+        profile_dir = workspace.root / "profile"
+        argv = [
+            self._judge.binary,
+            "bench",
+            "project",
+            job.project_slug or "",
+            "--dir",
+            str(contest),
+        ]
+        for label, path in sorted(staged.items()):
+            argv += ["--submission", f"{label}={path}"]
+        argv += [
+            "--input",
+            str(bench_input),
+            "--repetitions",
+            str(self._bench.repetitions),
+            "--warmups",
+            str(self._bench.warmups),
+            "--warmup-ms",
+            str(self._bench.warmup_ms),
+            "--attempts",
+            str(self._bench.attempts),
+            "--noise-threshold",
+            str(self._bench.noise_threshold),
+        ]
+        if self._bench.cpu >= 0:
+            argv += ["--cpu", str(self._bench.cpu)]
+        # The host check: cxxprobe times the calibration workload around the
+        # benchmark and reports NOISY if this machine moved off its baseline,
+        # which an evenly slowed host would otherwise pass with a tight IQR.
+        baseline = self._calibrator.state.baseline_ns if self._calibrator else None
+        if baseline is not None:
+            argv += [
+                "--host-baseline-ns",
+                f"{baseline:.0f}",
+                "--host-tolerance",
+                str(self._bench.calibration_tolerance),
+            ]
+        if self._bench.profile:
+            argv += ["--profile", str(profile_dir)]
+        argv.append("--json")
+        self._log.debug("judge.invoke", job_id=job.job_id, argv=argv)
+        completed = self._invoke(job, started, argv, timeout=self._bench.timeout_seconds)
+        if isinstance(completed, JobResult):
+            return completed
+        return self._interpret_benchmark(job, workspace, completed, started, input_hash)
+
+    def _interpret_benchmark(
+        self,
+        job: Job,
+        workspace: Workspace,
+        completed: subprocess.CompletedProcess[str],
+        started: float,
+        input_hash: str,
+    ) -> JobResult:
+        duration = time.monotonic() - started
+        try:
+            report = json.loads(completed.stdout) if completed.returncode in (0, 1) else None
+        except ValueError:
+            report = None
+        provenance = {
+            "machine_id": self._machine_id,
+            "calibration_ok": bool(self._calibrator and self._calibrator.state.ok),
+            "input_hash": input_hash,
+            "revision_hash": job.revision,
+            "team_id": job.team_id,
+            "revision_seq": job.revision_seq,
+        }
+        if not isinstance(report, dict) or not isinstance(report.get("result"), dict):
+            detail = completed.stderr.strip() or completed.stdout.strip() or "(no output)"
+            result = JobResult(
+                job_id=job.job_id,
+                status=JobStatus.RETRYABLE,
+                exit_code=completed.returncode,
+                duration_seconds=duration,
+                error=f"cxxprobe bench could not run (exit {completed.returncode}): {detail}",
+                provenance=provenance,
+            )
+            result.artifacts = self._persist(job, workspace, completed, result)
+            return result
+
+        report["provenance"] = provenance
+        status = str(report["result"].get("status"))
+        if self._calibrator is not None:
+            self._calibrator.job_done()
+        superseded = self._guard.superseded_after_run(job) if self._guard is not None else None
+        if superseded is not None:
+            outcome = JobStatus.FAILED
+            error: str | None = superseded
+        elif status == "OK":
+            outcome, error = JobStatus.SUCCEEDED, None
+            if self._guard is not None:
+                self._guard.record(job)
+        elif status == "NOISY":
+            # Retried, never scored: a noisy batch says the machine was
+            # contended, which another attempt or another bencher may not be.
+            reason = report.get("noise_reason") or "the batches were noisy"
+            outcome, error = (
+                JobStatus.RETRYABLE,
+                f"benchmark was noisy ({reason}); retried, not scored",
+            )
+            if self._calibrator is not None and isinstance(report.get("host"), dict):
+                drift = report["host"].get("drift")
+                if isinstance(drift, (int, float)) and drift > self._bench.calibration_tolerance:
+                    # This machine, not the code, is off: stop claiming until
+                    # a calibration passes again.
+                    self._calibrator.state.ok = False
+                    self._calibrator.state.reason = (
+                        f"host drifted {drift:.1%} from its calibration baseline during a benchmark"
+                    )
+        else:
+            reason = report.get("verify_reason") or "verification failed"
+            outcome, error = JobStatus.FAILED, f"rejected from benchmarking: {reason}"
+        result = JobResult(
+            job_id=job.job_id,
+            status=outcome,
+            exit_code=completed.returncode,
+            duration_seconds=duration,
+            report=report,
+            error=error,
+            provenance=provenance,
+        )
+        try:
+            workspace.report_path.write_text(json.dumps(report), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("report.unwritable", job_id=job.job_id, error=str(exc))
+        result.artifacts = self._persist(job, workspace, completed, result, include_stdout=False)
+        for name in ("flamegraph.svg", "stacks.folded"):
+            path = workspace.root / "profile" / name
+            if not path.is_file():
+                continue
+            try:
+                result.artifacts[f"profile/{name}"] = self._storage.put_file(
+                    job.job_id, f"profile/{name}", path
+                )
+            except StorageError as exc:
+                self._log.error("artifact.store_failed", job_id=job.job_id, error=str(exc))
+        self._log.info(
+            "bench.result",
+            job_id=job.job_id,
+            team=job.team_id,
+            revision_seq=job.revision_seq,
+            status=status,
+            median_ns=report["result"].get("median_ns"),
+            machine_id=self._machine_id,
+            input_hash=input_hash,
+        )
+        return result
+
     def _invoke(
-        self, job: Job, started: float, argv: list[str]
+        self, job: Job, started: float, argv: list[str], timeout: float | None = None
     ) -> subprocess.CompletedProcess[str] | JobResult:
         """Run one cxxprobe command, or say why it could not start."""
         try:
@@ -669,7 +892,7 @@ class JobExecutor:
                 argv,
                 capture_output=True,
                 text=True,
-                timeout=self._judge.timeout_seconds,
+                timeout=timeout or self._judge.timeout_seconds,
                 check=False,
             )
         except FileNotFoundError:
@@ -684,7 +907,7 @@ class JobExecutor:
                 job_id=job.job_id,
                 status=JobStatus.RETRYABLE,
                 duration_seconds=time.monotonic() - started,
-                error=f"cxxprobe {argv[1]} exceeded {self._judge.timeout_seconds}s",
+                error=f"cxxprobe {argv[1]} exceeded {timeout or self._judge.timeout_seconds}s",
             )
 
     def _interpret(
@@ -902,7 +1125,7 @@ class JobExecutor:
                 artifacts["submission.cpp"] = self._storage.put_file(
                     job.job_id, "submission.cpp", workspace.submission_path
                 )
-            if job.job_type == "project":
+            if job.job_type in ("project", "benchmark"):
                 artifacts.update(self._persist_parts(job, workspace, result))
         except StorageError as exc:
             self._log.error("artifact.store_failed", job_id=job.job_id, error=str(exc))
