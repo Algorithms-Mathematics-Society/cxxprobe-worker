@@ -28,7 +28,14 @@ from cxxprobe_worker.jobs import Job, JobError, JobResult, JobStatus
 from cxxprobe_worker.monitoring import HealthReporter, Metrics
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bench"
-EXIT = {"ok": 0, "noisy": 1, "failed_verify": 1, "calibrate_ok": 0, "calibrate_drift": 1}
+EXIT = {
+    "ok": 0,
+    "noisy": 1,
+    "noisy_host": 1,
+    "failed_verify": 1,
+    "calibrate_ok": 0,
+    "calibrate_drift": 1,
+}
 PROJECT_YAML = (
     "version: 1\nname: The Order Desk\nparts:\n"
     '  - {dir: parts/1-ingest, label: "1"}\n'
@@ -168,7 +175,10 @@ def test_an_ok_benchmark_is_timed_once_and_carries_its_provenance(
     for label in ("1", "2", "3"):
         assert f"--submission {label}=" in argv
     assert " --input " in argv and "benchmark-input" in argv
-    assert "--repetitions 7 --warmups 1 --attempts 3 --noise-threshold 0.05" in argv
+    assert (
+        "--repetitions 7 --warmups 1 --warmup-ms 1000 --attempts 3 --noise-threshold 0.05" in argv
+    )
+    assert "--host-baseline-ns" not in argv  # this machine has no baseline yet
     assert " --profile " in argv and argv.endswith(" --json")
 
     assert result.provenance == {
@@ -206,6 +216,25 @@ def test_a_noisy_benchmark_is_retried_not_scored(tmp_path, workspaces, storage, 
     assert result.status is JobStatus.RETRYABLE
     assert "noisy" in (result.error or "")
     assert BenchGuard(storage, BenchConfig()).latest_seq("team-7") is None
+
+
+def test_a_host_that_drifted_during_the_benchmark_stops_claiming(
+    tmp_path, workspaces, storage, logger
+):
+    contest, parts, hidden = make_contest(tmp_path)
+    binary, calls = fake_engine(tmp_path, "noisy_host")
+    executor = executor_for(binary, workspaces, storage, logger, calibration_tolerance=0.05)
+    calibrator = executor._calibrator
+    assert calibrator is not None
+    calibrator.state.baseline_ns = 1000.0
+
+    result = executor.execute(bench_job(contest, parts, hidden))
+
+    assert "--host-baseline-ns 1000 --host-tolerance 0.05" in calls.read_text()
+    assert result.status is JobStatus.RETRYABLE
+    assert "drifted" in (result.error or "")
+    assert not calibrator.state.ok
+    assert "host drifted" in calibrator.state.reason
 
 
 def test_code_that_fails_on_the_benchmark_input_is_rejected_with_its_reason(

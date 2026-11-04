@@ -198,6 +198,9 @@ class BenchConfig(BaseModel):
 
     repetitions: int = Field(default=7, ge=2)
     warmups: int = Field(default=1, ge=0)
+    warmup_ms: int = Field(default=1000, ge=0)
+    """Discarded runs last at least this long; one run does not settle a host
+    that has just compiled the parts."""
     attempts: int = Field(default=3, ge=1)
     noise_threshold: float = Field(default=0.05, gt=0)
     cpu: int = -1

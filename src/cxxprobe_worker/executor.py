@@ -751,6 +751,8 @@ class JobExecutor:
             str(self._bench.repetitions),
             "--warmups",
             str(self._bench.warmups),
+            "--warmup-ms",
+            str(self._bench.warmup_ms),
             "--attempts",
             str(self._bench.attempts),
             "--noise-threshold",
@@ -758,6 +760,17 @@ class JobExecutor:
         ]
         if self._bench.cpu >= 0:
             argv += ["--cpu", str(self._bench.cpu)]
+        # The host check: cxxprobe times the calibration workload around the
+        # benchmark and reports NOISY if this machine moved off its baseline,
+        # which an evenly slowed host would otherwise pass with a tight IQR.
+        baseline = self._calibrator.state.baseline_ns if self._calibrator else None
+        if baseline is not None:
+            argv += [
+                "--host-baseline-ns",
+                f"{baseline:.0f}",
+                "--host-tolerance",
+                str(self._bench.calibration_tolerance),
+            ]
         if self._bench.profile:
             argv += ["--profile", str(profile_dir)]
         argv.append("--json")
@@ -816,7 +829,20 @@ class JobExecutor:
         elif status == "NOISY":
             # Retried, never scored: a noisy batch says the machine was
             # contended, which another attempt or another bencher may not be.
-            outcome, error = JobStatus.RETRYABLE, "benchmark was noisy; retried, not scored"
+            reason = report.get("noise_reason") or "the batches were noisy"
+            outcome, error = (
+                JobStatus.RETRYABLE,
+                f"benchmark was noisy ({reason}); retried, not scored",
+            )
+            if self._calibrator is not None and isinstance(report.get("host"), dict):
+                drift = report["host"].get("drift")
+                if isinstance(drift, (int, float)) and drift > self._bench.calibration_tolerance:
+                    # This machine, not the code, is off: stop claiming until
+                    # a calibration passes again.
+                    self._calibrator.state.ok = False
+                    self._calibrator.state.reason = (
+                        f"host drifted {drift:.1%} from its calibration baseline during a benchmark"
+                    )
         else:
             reason = report.get("verify_reason") or "verification failed"
             outcome, error = JobStatus.FAILED, f"rejected from benchmarking: {reason}"
