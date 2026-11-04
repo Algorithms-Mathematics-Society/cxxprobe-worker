@@ -1,0 +1,65 @@
+{
+  "result": {
+    "status": "NOISY",
+    "median_ns": 107433479.0,
+    "iqr_ns": 6907180.0,
+    "instructions": null,
+    "repetitions": 3,
+    "pinned_core": 3
+  },
+  "input_sha256": "1c5af8f01d1a699dafee1845343733af9390097bcaf27a3af56fb060ded9406d",
+  "binary_sha256": "0edfbf43019de50e1916aea83fbea03b0defb941b1bf1697e889b1617bb38a61",
+  "cpu": {
+    "cpu": 3,
+    "siblings": [],
+    "reserved_core_free": true
+  },
+  "attempts": [
+    {
+      "median_ns": 122172837.0,
+      "iqr_ns": 19639557.5,
+      "relative_iqr": 0.16075224233353932,
+      "wall_ns": [
+        137912263,
+        122172837,
+        98633148
+      ],
+      "instructions": null
+    },
+    {
+      "median_ns": 107433479.0,
+      "iqr_ns": 6907180.0,
+      "relative_iqr": 0.0642926214834763,
+      "wall_ns": [
+        103909683,
+        107433479,
+        117724043
+      ],
+      "instructions": null
+    }
+  ],
+  "parts": [
+    {
+      "label": "1",
+      "slug": "order-desk/1-ingest",
+      "origin": "submission",
+      "source": "/work/parts/1.cpp",
+      "compiled": true
+    },
+    {
+      "label": "2",
+      "slug": "order-desk/2-book",
+      "origin": "submission",
+      "source": "/work/parts/2.cpp",
+      "compiled": true
+    },
+    {
+      "label": "3",
+      "slug": "order-desk/3-ship",
+      "origin": "submission",
+      "source": "/work/parts/3.cpp",
+      "compiled": true
+    }
+  ],
+  "project": "order-desk"
+}

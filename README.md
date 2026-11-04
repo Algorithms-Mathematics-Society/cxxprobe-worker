@@ -53,6 +53,7 @@ uv run cxxprobe-worker run --env test
 | `submit` | Enqueue a job — for local testing and manual rejudges |
 | `status` | Queue depth plus the last heartbeat |
 | `recover-result` | Inspect or enqueue one exact saved callback; dry-run by default |
+| `cancel` | Cancel a queued benchmark job; any bencher that claims it refuses it |
 | `doctor` | Verify the cxxprobe binary is runnable and every configured path is writable |
 
 ## Configuration
@@ -102,6 +103,60 @@ Retryable jobs are redelivered up to `queue.max_delivery_attempts` (default 5)
 and then parked in `<queue root>/dead/`, because a retryable classification
 cannot distinguish "this host is broken" from "this package is broken" on the
 first attempt.
+
+## Benchmark jobs
+
+A worker is either a judge or a bencher (`role: judge | bencher`), never both.
+A bencher (`config/bench.yaml`) runs exactly one job at a time, only benchmark
+jobs, from its own queue; a job for the other role goes back on the queue
+untouched. See `deploy/README.md` for the pool it runs on.
+
+```json
+{"job_id": "b-123", "job_type": "benchmark",
+ "package_path": "s3://bucket/packs/round-2.cxxpkg", "project_slug": "order-desk",
+ "parts": {"1": "s3://bucket/subs/t7/1.cpp", "2": "...", "3": "..."},
+ "team_id": "team-7", "revision": "9f1c2ab", "revision_seq": 41,
+ "benchmark_input": "s3://bucket/bench/round-2/order-desk/input-r2.txt"}
+```
+
+Every part must be supplied (no fallbacks), the hidden `benchmark_input` is
+staged by the worker and never part of the package, and the job runs
+`cxxprobe bench project`, which builds the parts once, verifies the binary's
+output on that input against the reference parts, and only then times that
+same binary (cxxprobe's `schemas/benchmark-result.md`).
+
+| Engine result | Job outcome | Scored? |
+|---|---|---|
+| `OK` | `succeeded`; the team's newest `revision_seq` is recorded | yes |
+| `NOISY` | `retryable` | no, retried |
+| `FAILED_VERIFY` | `failed`, with the reason (`rejected from benchmarking: ...`) | no |
+| superseded, cancelled, rate-limited | `failed` before anything is fetched | no |
+| bencher unhealthy (calibration) | `retryable` for a healthy bencher | no |
+
+The published result carries the engine's record unchanged plus its
+provenance, under `benchmark`: `status`, `median_ns`, `iqr_ns`,
+`instructions`, `repetitions`, `pinned_core`, `machine_id`,
+`calibration_ok`, `input_hash` (SHA-256 of the input actually timed),
+`revision_hash`, `team_id`, `revision_seq`, and the per-part profile shares.
+Results are only comparable within one `input_hash`, and only an `OK` record
+with `calibration_ok: true` may rank. The flamegraph and folded stacks are
+stored as `profile/flamegraph.svg` and `profile/stacks.folded`.
+
+**Calibration.** A bencher runs `cxxprobe bench calibrate` before it claims
+anything, then every `bench.calibration_every_seconds` or
+`calibration_every_jobs` jobs. A noisy or drifted calibration stops claiming
+and writes `unhealthy: <reason>` to the health file until a later calibration
+passes. Set `bench.calibration_baseline_ns` to the pool's measured median so
+every machine is held to the same speed.
+
+**Supersession and rate limits.** Benchers coordinate through markers in the
+shared artifact storage under the reserved `_bench` namespace: a job older
+than its team's newest benchmarked `revision_seq` is refused before it runs and
+again before its result is published, so a late older result never
+overwrites a newer one; `cxxprobe-worker cancel <job_id>` refuses a queued job;
+and a team's benchmarks are at least `bench.min_team_interval_seconds` apart.
+The markers are best-effort across machines, so the consumer must also keep
+the highest `revision_seq` per team, which every result carries.
 
 ## Storage and queue backends
 

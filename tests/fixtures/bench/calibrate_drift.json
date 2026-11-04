@@ -1,0 +1,25 @@
+{
+  "ok": false,
+  "noisy": false,
+  "median_ns": 222659714.0,
+  "iqr_ns": 59671472.0,
+  "instructions": null,
+  "repetitions": 3,
+  "drift": 222658.714,
+  "cpu": {
+    "cpu": 3,
+    "siblings": [],
+    "reserved_core_free": true
+  },
+  "batch": {
+    "median_ns": 222659714.0,
+    "iqr_ns": 59671472.0,
+    "relative_iqr": 0.2679940206875501,
+    "wall_ns": [
+      333150333,
+      222659714,
+      213807389
+    ],
+    "instructions": null
+  }
+}

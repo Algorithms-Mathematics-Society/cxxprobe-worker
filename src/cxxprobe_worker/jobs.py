@@ -60,7 +60,7 @@ class Job(BaseModel):
     package_path: str
     """A cxxprobe pack zip, an unpacked problem directory, or an s3:// URI."""
 
-    job_type: Literal["problem", "project"] = "problem"
+    job_type: Literal["problem", "project", "benchmark"] = "problem"
     """Which shape this job is. Explicit rather than inferred from which
     fields happen to be set, so a malformed payload fails at parse time
     instead of halfway through judging.
@@ -90,6 +90,23 @@ class Job(BaseModel):
     ``empty`` proves the integration genuinely needs it. Project jobs only.
     A label named here may be left out of ``parts``.
     """
+
+    team_id: str | None = None
+    """Benchmark jobs: the team whose revision this is. Supersession and the
+    per-team rate limit are keyed on it."""
+
+    revision: str | None = None
+    """Benchmark jobs: the source revision hash, recorded with the result so
+    a number is traceable to the code that produced it."""
+
+    revision_seq: int | None = Field(default=None, ge=0)
+    """Benchmark jobs: increases with every revision a team submits. A job
+    older than the newest one benchmarked for its team is never scored."""
+
+    benchmark_input: str | None = None
+    """Benchmark jobs: the hidden benchmark input, local path or s3:// URI.
+    Regenerated per round by whatever enqueues the job; the worker records
+    its content hash with the result."""
 
     problem_slug: str | None = None
     """Advisory only — cxxprobe resolves the problem from the package itself.
@@ -157,9 +174,33 @@ class Job(BaseModel):
                 raise ValueError("a problem job must not carry project_slug")
             if self.fallback is not None:
                 raise ValueError("a problem job must not carry fallback")
+            for name in ("team_id", "revision", "revision_seq", "benchmark_input"):
+                if getattr(self, name) is not None:
+                    raise ValueError(f"only a benchmark job carries {name}")
             if not self.submission_path:
                 raise ValueError("a problem job needs submission_path")
             return self
+
+        bench_only = {
+            "team_id": self.team_id,
+            "revision": self.revision,
+            "revision_seq": self.revision_seq,
+            "benchmark_input": self.benchmark_input,
+        }
+        if self.job_type == "benchmark":
+            missing = [name for name, value in bench_only.items() if value in (None, "")]
+            if missing:
+                raise ValueError(f"a benchmark job needs {', '.join(missing)}")
+            if self.fallback:
+                raise ValueError(
+                    "a benchmark job times every part as submitted; it takes no fallback"
+                )
+            if not PART_LABEL.fullmatch(self.team_id or ""):
+                raise ValueError(f"team_id {self.team_id!r} is not a plain name")
+        else:
+            present = [name for name, value in bench_only.items() if value is not None]
+            if present:
+                raise ValueError(f"only a benchmark job carries {', '.join(present)}")
 
         if self.submission_path is not None:
             raise ValueError("a project job takes its sources from parts, not submission_path")
@@ -205,6 +246,10 @@ class JobResult(BaseModel):
     """The signal that killed cxxprobe itself (``SIGPIPE``, ``SIGSEGV``, …),
     when that is how the run ended. Set only when the submission is to blame,
     which makes it a runtime error with a verdict rather than a retry."""
+
+    provenance: dict[str, Any] | None = None
+    """Benchmark jobs: machine_id, calibration_ok, input_hash, revision_hash,
+    plus team_id and revision_seq, published beside the engine's record."""
 
     package_cache: Literal["hit", "miss"] | None = None
     """Whether this job's package came from the local cache. ``None`` when
