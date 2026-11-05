@@ -5,10 +5,10 @@ import subprocess
 
 import pytest
 import yaml
-from tests.test_integration import build_executor
-from tests.test_integration import real_problem as real_problem
 
 from cxxprobe_worker.jobs import Job, JobStatus
+from tests.test_integration import build_executor
+from tests.test_integration import real_problem as real_problem
 
 
 @pytest.fixture
