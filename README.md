@@ -104,6 +104,28 @@ and then parked in `<queue root>/dead/`, because a retryable classification
 cannot distinguish "this host is broken" from "this package is broken" on the
 first attempt.
 
+## Selecting one problem or project part
+
+Ordinary jobs (`job_type: problem`), including custom runs and rejudges, may
+set `problem_slug` to an **exact engine identity**. A plain problem uses its
+folder basename; a declared project part uses `project-slug/part-basename`.
+For example, `desk/nested/beta` on disk, declared as `dir: nested/beta` in
+`desk/project.yaml`, has identity `desk/beta`. Its part label is not a selector.
+
+For ZIP inputs (including S3 packages), the worker uses `cxxprobe package unpack`
+in the private workspace, resolves that identity against the declared project
+parts or plain problems, and invokes `cxxprobe judge --problem-dir` on the
+selected directory. Directory inputs may be a plain problem, a project root,
+or a contest root. Shared headers and sources stay alongside the selected part.
+This follows the engine's `project_discovery.cpp` identity contract; `judge`
+has no selector flag and its direct `--package` mode accepts only one plain
+problem. Unknown/ambiguous selectors and escaping part paths fail permanently,
+without choosing the first part or substituting a reference solution.
+
+Omit `problem_slug` to retain the existing single-problem command path. An empty
+string is an invalid selector, not an omission. Project and benchmark jobs
+continue to use their existing `project_slug` and part-label contracts.
+
 ## Benchmark jobs
 
 A worker is either a judge or a bencher (`role: judge | bencher`), never both.

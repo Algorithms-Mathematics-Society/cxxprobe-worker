@@ -273,6 +273,60 @@ def _stage_inputs(
     return _stage_package(job, workspace, fetcher, cache, outcome)
 
 
+def _select_problem(root: Path, selector: str) -> Path:
+    """Match engine identities: plain basename or project/declared-part-basename.
+
+    The engine has no judge selector flag. Preserve the unpacked project tree
+    and pass the selected directory to judge, which loads shared project files.
+    Labels and physical paths are not identities (project_discovery.cpp).
+    """
+    matches: list[Path] = []
+    units = (
+        [root]
+        if (root / "project.yaml").is_file() or (root / "problem.yaml").is_file()
+        else list(root.iterdir())
+    )
+    for unit in units:
+        if not unit.is_dir():
+            continue
+        if (unit / "project.yaml").is_file():
+            try:
+                project = yaml.safe_load((unit / "project.yaml").read_text())
+                parts = project["parts"]
+                if not isinstance(parts, list):
+                    raise PreparationError("problem selector: parts must be a list")
+                for part in parts:
+                    directory = part["dir"]
+                    if not isinstance(directory, str) or not directory:
+                        raise PreparationError("problem selector: part dir must be nonempty text")
+                    relative = Path(directory)
+                    target = unit / relative
+                    if (
+                        relative.is_absolute()
+                        or ".." in relative.parts
+                        or not target.resolve().is_relative_to(unit.resolve())
+                    ):
+                        raise PreparationError("problem selector: part directory escapes project")
+                    if selector == f"{unit.name}/{relative.name}":
+                        matches.append(target)
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                KeyError,
+                RecursionError,
+                yaml.YAMLError,
+            ) as exc:
+                raise PreparationError(f"cannot resolve problem selector: {exc}") from exc
+        elif (unit / "problem.yaml").is_file() and selector == unit.name:
+            matches.append(unit)
+    if len(matches) != 1 or not (matches[0] / "problem.yaml").is_file():
+        raise PreparationError(
+            f"problem selector {selector!r} must match exactly one declared problem"
+        )
+    return matches[0]
+
+
 def _stage_parts(job: Job, workspace: Workspace, fetcher: Any = None) -> dict[str, Path]:
     """Bring every part of a project job into the one workspace, by label.
 
@@ -458,6 +512,10 @@ def _stage_package(
         package = package.resolve()
         if not package.name:
             raise PreparationError("problem directory has no usable basename")
+        if job.job_type == "problem" and job.problem_slug is not None:
+            # Check before copytree follows symlinks: copying an escaping part
+            # would otherwise turn it into an apparently contained directory.
+            _select_problem(package, job.problem_slug)
         staged = workspace.package_dir / package.name
         try:
             shutil.copytree(package, staged, dirs_exist_ok=True)
@@ -568,6 +626,29 @@ class JobExecutor:
         package_flag, package_path = _stage_inputs(
             job, workspace, self._fetcher, self._packages, outcome
         )
+
+        if job.problem_slug is not None:
+            if package_flag == "--package":
+                unpacked = self._invoke(
+                    job,
+                    started,
+                    [
+                        self._judge.binary,
+                        "package",
+                        "unpack",
+                        str(package_path),
+                        "--dir",
+                        str(workspace.contest_dir),
+                    ],
+                )
+                if isinstance(unpacked, JobResult):
+                    return unpacked
+                if unpacked.returncode != 0:
+                    detail = unpacked.stderr.strip() or unpacked.stdout.strip() or "(no output)"
+                    raise PreparationError(f"cannot unpack selected problem package: {detail}")
+                package_path = workspace.contest_dir
+            package_path = _select_problem(package_path, job.problem_slug)
+            package_flag = "--problem-dir"
 
         argv = [
             self._judge.binary,

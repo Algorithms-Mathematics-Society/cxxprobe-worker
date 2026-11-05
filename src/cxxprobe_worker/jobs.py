@@ -109,10 +109,12 @@ class Job(BaseModel):
     its content hash with the result."""
 
     problem_slug: str | None = None
-    """Advisory only — cxxprobe resolves the problem from the package itself.
+    """Exact problem identity for ordinary judging, custom runs and rejudging.
 
-    Carried through into logs and the result so an operator can correlate a
-    job with whatever system enqueued it.
+    Plain problems use their directory basename; project parts use
+    ``project-slug/part-directory-basename``, not their label or physical path.
+    Unknown or ambiguous selectors fail permanently without judging another part.
+    None preserves the legacy single-problem package behavior.
     """
 
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -121,7 +121,8 @@ jobs:
           assert report["exit_code"] == 0, report
           assert re.fullmatch(r"0::/cxxprobe/[0-9a-f]{16}\n?", report["stdout"]), report
           PYTHON
-          uv run pytest tests/test_integration.py --require-real-engine -v -rs \
+          uv run pytest tests/test_integration.py tests/test_problem_selection_real.py \
+            --require-real-engine -v -rs \
             --junitxml=real-engine-results.xml
 
       - name: Upload real-engine test results
