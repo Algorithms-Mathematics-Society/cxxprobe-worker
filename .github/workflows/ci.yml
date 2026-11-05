@@ -43,13 +43,26 @@ jobs:
       - name: Test
         run: uv run pytest --cov=cxxprobe_worker --cov-report=term-missing
 
-  # The integration suite needs a real cxxprobe build. It is skipped rather
-  # than failed when the binary is absent, so this job proves the wiring
-  # works end to end without making every PR wait on a C++ build.
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # Independent CI compatibility pin; does not change the deployment release.
+      CXXPROBE_COMMIT: dd0c9901756519110b9996cbeebcde3eb427aa84
+      CC: gcc-14
+      CXX: g++-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check out pinned engine
+        uses: actions/checkout@v4
+        with:
+          repository: Algorithms-Mathematics-Society/cxxprobe
+          ref: ${{ env.CXXPROBE_COMMIT }}
+          path: .engine
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -57,7 +70,64 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: |
+          uv sync --locked --all-groups --python 3.12
+          sudo timeout 180 apt-get update
+          sudo timeout 600 apt-get install -y --no-install-recommends gcc-14 g++-14 apparmor
+          uv tool install 'conan>=2,<3'
+          uv tool install 'cmake>=3.30,<5'
 
-      - name: Run integration suite
-        run: uv run pytest tests/test_integration.py -v
+      - name: Build pinned engine
+        run: |
+          test "$(git -C .engine rev-parse HEAD)" = "$CXXPROBE_COMMIT"
+          conan profile detect --force
+          conan install .engine -s build_type=Release -s compiler.cppstd=23 \
+            --output-folder=.engine/build --build=missing
+          cmake -S .engine -B .engine/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake \
+            -DCXXPROBE_BUILD_SERVER=OFF -DCXXPROBE_BUILD_TESTS=OFF -DCLANG_TIDY_BIN=
+          cmake --build .engine/build --target cxxprobe-cli --parallel 2
+          echo "CXXPROBE_BINARY=$GITHUB_WORKSPACE/.engine/build/cli/cxxprobe-cli" >> "$GITHUB_ENV"
+
+      - name: Run mandatory real-engine suite
+        run: |
+          # Allow namespaces only for this binary on Ubuntu's restricted host.
+          # https://documentation.ubuntu.com/release-notes/24.04/
+          cat > "$RUNNER_TEMP/cxxprobe-worker-ci.apparmor" <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile cxxprobe-worker-ci "$CXXPROBE_BINARY" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "$RUNNER_TEMP/cxxprobe-worker-ci.apparmor"
+          # Delegate only the test tree. The test shell and engine remain non-root.
+          test "$(id -u)" -ne 0
+          sudo sh -c 'echo "+memory +cpu +pids" > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo mkdir -p /sys/fs/cgroup/cxxprobe/worker-ci
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/cxxprobe
+          echo '+memory +cpu +pids' > /sys/fs/cgroup/cxxprobe/cgroup.subtree_control
+          sudo sh -c 'echo "$1" > /sys/fs/cgroup/cxxprobe/worker-ci/cgroup.procs' sh "$$"
+          test "$(cat /proc/self/cgroup)" = '0::/cxxprobe/worker-ci'
+          test -w /sys/fs/cgroup/cxxprobe/cgroup.procs
+          test -w /sys/fs/cgroup/cxxprobe/worker-ci/cgroup.kill
+          "$CXXPROBE_BINARY" --version
+          # Prove actual child membership, including engines with a fallback path.
+          "$CXXPROBE_BINARY" run --wall 2s --json -- /bin/cat /proc/self/cgroup > "$RUNNER_TEMP/sandbox-probe.json"
+          uv run python - "$RUNNER_TEMP/sandbox-probe.json" <<'PYTHON'
+          import json, re, sys
+          with open(sys.argv[1]) as stream:
+              report = json.load(stream)
+          assert report["exit_code"] == 0, report
+          assert re.fullmatch(r"0::/cxxprobe/[0-9a-f]{16}\n?", report["stdout"]), report
+          PYTHON
+          uv run pytest tests/test_integration.py --require-real-engine -v -rs \
+            --junitxml=real-engine-results.xml
+
+      - name: Upload real-engine test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-engine-results
+          path: real-engine-results.xml
+          if-no-files-found: warn
