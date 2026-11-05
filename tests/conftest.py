@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,111 @@ from cxxprobe_worker.workspace import WorkspaceManager
 # that can drift.
 _PIN_SOURCE = Path(__file__).parent.parent / "deploy" / "spot-user-data.sh"
 _PIN = re.compile(r'CXXPROBE_VERSION="\$\{CXXPROBE_VERSION:-([^}"]+)\}"')
+_INTEGRATION_TEST = Path(__file__).with_name("test_integration.py").resolve()
+_REQUIRED_CASES = {
+    "test_correct_solution_is_judged_and_stored",
+    "test_wrong_solution_is_still_a_successful_job",
+    "test_packaged_zip_is_judged",
+}
+_PASSED_CASES = pytest.StashKey[set[str]]()
+_GATE_ERROR = pytest.StashKey[str]()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--require-real-engine",
+        action="store_true",
+        help="Require a usable real engine and all three integration cases to pass without skips",
+    )
+
+
+def _engine_binary() -> str | None:
+    configured = os.environ.get("CXXPROBE_BINARY") or "cxxprobe"
+    found = shutil.which(configured)
+    return str(Path(found).resolve()) if found else None
+
+
+def _check_engine(binary: str | None) -> str | None:
+    if binary is None:
+        return "real engine binary is missing or not executable (set CXXPROBE_BINARY)"
+    try:
+        result = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"real engine binary cannot run --version: {exc}"
+    version = (result.stdout or result.stderr).strip()
+    if result.returncode != 0 or not re.fullmatch(r"cxxprobe v?\d+\.\d+\.\d+(?:[-+]\S+)?", version):
+        return (
+            f"invalid real engine --version (exit {result.returncode}): {version or '(no output)'}"
+        )
+    return None
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    session.config.stash[_PASSED_CASES] = set()
+    if session.config.getoption("--require-real-engine"):
+        error = _check_engine(_engine_binary())
+        if error:
+            raise pytest.UsageError(f"--require-real-engine: {error}")
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    if session.config.getoption("--require-real-engine"):
+        selected = {item.name for item in session.items if item.path.resolve() == _INTEGRATION_TEST}
+        missing = _REQUIRED_CASES - selected
+        if missing:
+            raise pytest.UsageError(
+                "--require-real-engine: all three real-engine integration cases must be selected; "
+                f"missing: {', '.join(sorted(missing))}"
+            )
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_makereport(
+    item: pytest.Item,
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    report = yield
+    if item.config.getoption("--require-real-engine") and item.path.resolve() == _INTEGRATION_TEST:
+        if report.skipped or hasattr(report, "wasxfail"):
+            report.outcome = "failed"
+            report.longrepr = (
+                f"--require-real-engine rejects skipped/xfail integration: {report.longrepr}"
+            )
+            # Pytest excludes reports carrying wasxfail from its failure count,
+            # even if their outcome is changed. This matters for teardown xfail
+            # after all required call phases have already passed.
+            if hasattr(report, "wasxfail"):
+                delattr(report, "wasxfail")
+            item.config.stash[_GATE_ERROR] = str(report.longrepr)
+        elif report.when == "call" and report.passed:
+            item.config.stash[_PASSED_CASES].add(item.name)
+    return report
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    if session.config.getoption("--require-real-engine") and exitstatus == 0:
+        passed = session.config.stash[_PASSED_CASES]
+        missing = _REQUIRED_CASES - passed
+        if missing and not session.config.stash.get(_GATE_ERROR, ""):
+            session.config.stash[_GATE_ERROR] = (
+                "--require-real-engine: integration cases did not execute and pass: "
+                + ", ".join(sorted(missing))
+            )
+        if session.config.stash.get(_GATE_ERROR, ""):
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.fixture(scope="session")
+def real_engine_binary(pytestconfig: pytest.Config) -> str:
+    binary = _engine_binary()
+    error = _check_engine(binary)
+    if error:
+        if pytestconfig.getoption("--require-real-engine"):
+            pytest.fail(error)
+        pytest.skip(error)
+    assert binary is not None
+    return binary
 
 
 def _pinned_engine() -> str:
@@ -61,6 +167,9 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
         f"pinned:     {_pinned_engine()} ({_PIN_SOURCE.relative_to(_PIN_SOURCE.parents[1])})"
     )
     terminalreporter.write_line(f"under test: {_engine_under_test()}")
+    gate_error = terminalreporter.config.stash.get(_GATE_ERROR, "")
+    if gate_error:
+        terminalreporter.write_line(gate_error, red=True)
 
 
 @pytest.fixture

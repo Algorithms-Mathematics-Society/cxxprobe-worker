@@ -302,3 +302,22 @@ Those tests also skip on a host without cgroup delegation, since the worker
 correctly reports that as `retryable` and there is nothing further to assert.
 Everything else in the suite runs everywhere, using a scripted stand-in that
 reproduces cxxprobe's exit-code contract exactly.
+
+CI runs these three cases in mandatory mode:
+
+```bash
+CXXPROBE_BINARY=/path/to/cxxprobe uv run pytest tests/test_integration.py --require-real-engine -v
+```
+
+Mandatory mode fails on missing prerequisites, failed scaffolding/packaging,
+unavailable sandboxing, skipped cases, or missing cases. The CI integration job
+builds the exact engine commit recorded in `.github/workflows/ci.yml`, delegates
+an isolated cgroup tree, and runs the tests as the normal runner user. The source
+commit is verified before building; no release token or unverified binary download
+is needed. This compatibility pin is independent of the fleet release pin in
+`deploy/spot-user-data.sh`; updating CI does not deploy a new engine.
+
+A local mandatory run requires the test shell inside the delegated cgroup tree,
+with CPU, memory, and process controllers enabled. Optional local runs retain
+the skips described above. CI uploads a JUnit report so executed/skipped counts
+are visible.
