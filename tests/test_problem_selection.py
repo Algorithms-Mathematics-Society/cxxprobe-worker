@@ -155,3 +155,29 @@ def test_plain_problem_compatibility(
         )
     )
     assert result.status is (JobStatus.FAILED if selector == "other" else JobStatus.SUCCEEDED)
+
+
+def test_deeply_nested_project_yaml_is_a_permanent_failure(
+    tmp_path, workspaces, storage, logger, monkeypatch
+):
+    root = project_tree(tmp_path)
+    (root / "desk/project.yaml").write_text("parts: " + "[" * 1200 + "0" + "]" * 1200)
+    submission = tmp_path / "source.cpp"
+    submission.write_text("int main(){}")
+    executor = JobExecutor(JudgeConfig(), workspaces, storage, logger)
+
+    def forbidden(*args):
+        pytest.fail("malformed project invoked the judge")
+
+    monkeypatch.setattr(executor, "_invoke", forbidden)
+    result = executor.execute(
+        Job(
+            job_id="nested-yaml",
+            package_path=str(root),
+            submission_path=str(submission),
+            problem_slug="desk/alpha",
+        )
+    )
+    assert result.status is JobStatus.FAILED
+    assert not result.should_retry
+    assert "selector" in (result.error or "")
