@@ -309,7 +309,14 @@ def _select_problem(root: Path, selector: str) -> Path:
                         raise PreparationError("problem selector: part directory escapes project")
                     if selector == f"{unit.name}/{relative.name}":
                         matches.append(target)
-            except (OSError, ValueError, TypeError, KeyError, RecursionError, yaml.YAMLError) as exc:
+            except (
+                OSError,
+                ValueError,
+                TypeError,
+                KeyError,
+                RecursionError,
+                yaml.YAMLError,
+            ) as exc:
                 raise PreparationError(f"cannot resolve problem selector: {exc}") from exc
         elif (unit / "problem.yaml").is_file() and selector == unit.name:
             matches.append(unit)
