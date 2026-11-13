@@ -45,7 +45,7 @@ from typing import Any
 
 import yaml
 
-from cxxprobe_worker import project_report
+from cxxprobe_worker import candidate_package, project_report, source_bundle
 from cxxprobe_worker.bench import BenchGuard, Calibrator
 from cxxprobe_worker.config import BenchConfig, JudgeConfig
 from cxxprobe_worker.jobs import Job, JobResult, JobStatus
@@ -267,9 +267,24 @@ def _stage_inputs(
     Copying (or downloading) rather than referencing in place means a job can
     never mutate shared state, and a retry starts from identical inputs.
     """
-    if job.submission_path is None:
-        raise PreparationError("problem job has no submission_path")
-    _stage_file(job.submission_path, workspace.submission_path, fetcher, "submission")
+    if job.submission_bundle_path is not None:
+        _stage_file(
+            job.submission_bundle_path,
+            workspace.submission_bundle_path,
+            fetcher,
+            "submission bundle",
+        )
+        try:
+            entry = source_bundle.unpack(
+                workspace.submission_bundle_path, workspace.submission_files_dir
+            )
+        except source_bundle.BundleError as exc:
+            raise PreparationError(str(exc)) from exc
+        (workspace.root / "candidate-entry").write_text(str(entry), encoding="utf-8")
+    elif job.submission_path is not None:
+        _stage_file(job.submission_path, workspace.submission_path, fetcher, "submission")
+    else:
+        raise PreparationError("problem job has no submission source")
     return _stage_package(job, workspace, fetcher, cache, outcome)
 
 
@@ -339,9 +354,17 @@ def _stage_parts(job: Job, workspace: Workspace, fetcher: Any = None) -> dict[st
     except OSError as exc:
         raise PreparationError(f"cannot create parts directory: {exc}") from exc
     for label, uri in sorted((job.parts or {}).items()):
-        destination = workspace.part_path(label)
-        _stage_file(uri, destination, fetcher, f"submission for part {label}")
-        staged[label] = destination
+        if uri.endswith("/source.bundle.zip") or uri.endswith(".bundle.zip"):
+            archive = workspace.parts_dir / f"{label}.bundle.zip"
+            _stage_file(uri, archive, fetcher, f"submission bundle for part {label}")
+            try:
+                staged[label] = source_bundle.unpack(archive, workspace.parts_dir / label)
+            except source_bundle.BundleError as exc:
+                raise PreparationError(str(exc)) from exc
+        else:
+            destination = workspace.part_path(label)
+            _stage_file(uri, destination, fetcher, f"submission for part {label}")
+            staged[label] = destination
     return staged
 
 
@@ -627,7 +650,9 @@ class JobExecutor:
             job, workspace, self._fetcher, self._packages, outcome
         )
 
-        if job.problem_slug is not None:
+        if job.problem_slug is not None or (
+            job.submission_bundle_path is not None and package_flag == "--package"
+        ):
             if package_flag == "--package":
                 unpacked = self._invoke(
                     job,
@@ -647,8 +672,24 @@ class JobExecutor:
                     detail = unpacked.stderr.strip() or unpacked.stdout.strip() or "(no output)"
                     raise PreparationError(f"cannot unpack selected problem package: {detail}")
                 package_path = workspace.contest_dir
-            package_path = _select_problem(package_path, job.problem_slug)
+            if job.problem_slug is not None:
+                package_path = _select_problem(package_path, job.problem_slug)
+            else:
+                problems = [
+                    child
+                    for child in package_path.iterdir()
+                    if child.is_dir() and (child / "problem.yaml").is_file()
+                ]
+                if len(problems) != 1:
+                    raise PreparationError("bundle package must declare exactly one plain problem")
+                package_path = problems[0]
             package_flag = "--problem-dir"
+
+        if job.submission_bundle_path is not None:
+            try:
+                candidate_package.sanitize_attachments(package_path)
+            except candidate_package.CandidatePackageError as exc:
+                raise PreparationError(str(exc)) from exc
 
         argv = [
             self._judge.binary,
@@ -656,10 +697,12 @@ class JobExecutor:
             package_flag,
             str(package_path),
             "--submission",
-            str(workspace.submission_path),
+            str(workspace.candidate_path),
             "--output",
             str(workspace.report_path),
         ]
+        if job.submission_bundle_path is not None:
+            argv.append("--candidate-bundle")
 
         if job.custom_cases is not None:
             # An empty list is a client bug, and the dangerous reading of it
@@ -723,6 +766,17 @@ class JobExecutor:
         else:
             contest = package_path
 
+        bundled_labels = {
+            label
+            for label in job.parts or {}
+            if (workspace.parts_dir / f"{label}.bundle.zip").is_file()
+        }
+        if bundled_labels:
+            try:
+                candidate_package.sanitize_project(contest, job.project_slug or "", bundled_labels)
+            except candidate_package.CandidatePackageError as exc:
+                raise PreparationError(str(exc)) from exc
+
         argv = [
             self._judge.binary,
             "test",
@@ -733,6 +787,8 @@ class JobExecutor:
         ]
         for label, path in sorted(staged.items()):
             argv += ["--submission", f"{label}={path}"]
+        if any(path.is_file() for path in workspace.parts_dir.glob("*.bundle.zip")):
+            argv.append("--candidate-bundle")
         for label, mode in sorted((job.fallback or {}).items()):
             argv += ["--fallback", f"{label}={mode}"]
         # No `extra_args`: they are flags for `cxxprobe judge`, which this
@@ -812,6 +868,17 @@ class JobExecutor:
         else:
             contest = package_path
 
+        bundled_labels = {
+            label
+            for label in job.parts or {}
+            if (workspace.parts_dir / f"{label}.bundle.zip").is_file()
+        }
+        if bundled_labels:
+            try:
+                candidate_package.sanitize_project(contest, job.project_slug or "", bundled_labels)
+            except candidate_package.CandidatePackageError as exc:
+                raise PreparationError(str(exc)) from exc
+
         if guard is not None:
             guard.started(job)
         profile_dir = workspace.root / "profile"
@@ -825,6 +892,8 @@ class JobExecutor:
         ]
         for label, path in sorted(staged.items()):
             argv += ["--submission", f"{label}={path}"]
+        if any(path.is_file() for path in workspace.parts_dir.glob("*.bundle.zip")):
+            argv.append("--candidate-bundle")
         argv += [
             "--input",
             str(bench_input),
@@ -1092,6 +1161,10 @@ class JobExecutor:
             if source.is_file():
                 name = f"parts/{label}/submission.cpp"
                 artifacts[name] = self._storage.put_file(job.job_id, name, source)
+            bundle = workspace.parts_dir / f"{label}.bundle.zip"
+            if bundle.is_file():
+                name = f"parts/{label}/submission.bundle.zip"
+                artifacts[name] = self._storage.put_file(job.job_id, name, bundle)
         report = result.report
         if not project_report.is_project_report(report):
             return artifacts
@@ -1205,6 +1278,10 @@ class JobExecutor:
             if workspace.submission_path.is_file():
                 artifacts["submission.cpp"] = self._storage.put_file(
                     job.job_id, "submission.cpp", workspace.submission_path
+                )
+            if workspace.submission_bundle_path.is_file():
+                artifacts["submission.bundle.zip"] = self._storage.put_file(
+                    job.job_id, "submission.bundle.zip", workspace.submission_bundle_path
                 )
             if job.job_type in ("project", "benchmark"):
                 artifacts.update(self._persist_parts(job, workspace, result))

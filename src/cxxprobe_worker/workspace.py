@@ -41,6 +41,21 @@ class Workspace:
         return self.root / "submission.cpp"
 
     @property
+    def submission_bundle_path(self) -> Path:
+        return self.root / "submission.bundle.zip"
+
+    @property
+    def submission_files_dir(self) -> Path:
+        return self.root / "submission-files"
+
+    @property
+    def candidate_path(self) -> Path:
+        marker = self.root / "candidate-entry"
+        return (
+            Path(marker.read_text(encoding="utf-8")) if marker.is_file() else self.submission_path
+        )
+
+    @property
     def contest_dir(self) -> Path:
         """Where a project job's contest pack is unpacked for cxxprobe."""
         return self.root / "contest"

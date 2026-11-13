@@ -115,6 +115,38 @@ def project_job(package: Path, parts: dict[str, str], **extra) -> Job:
     )
 
 
+def test_project_bundle_reaches_engine_with_capability_flag(tmp_path, workspaces, storage, logger):
+    contest, sources = make_project(tmp_path)
+    part_dir = contest / "order-desk/parts/1-ingest"
+    part_dir.mkdir(parents=True)
+    (part_dir / "problem.yaml").write_text("version: 2\nname: Ingest\n")
+    bundle = tmp_path / "source.bundle.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": "ams-source-bundle-v1",
+                    "entrypoint": "main.cpp",
+                    "compilation_units": ["main.cpp", "helper.cpp"],
+                }
+            ),
+        )
+        archive.writestr("files/main.cpp", "int main(){return answer();}")
+        archive.writestr("files/helper.cpp", "int answer(){return 42;}")
+        archive.writestr("files/helper.hpp", "int answer();")
+    sources["1"] = str(bundle)
+    binary, calls = fake_engine(tmp_path, "passing")
+    result = executor_for(binary, workspaces, storage, logger).execute(
+        project_job(contest, sources)
+    )
+    assert result.status is JobStatus.SUCCEEDED
+    invocation = calls.read_text()
+    assert "--candidate-bundle" in invocation
+    assert "/parts/1/main.cpp" in invocation
+    assert "parts/1/submission.bundle.zip" in result.artifacts
+
+
 # ── jobs and the command line (#7, #8) ─────────────────────────────────
 
 
