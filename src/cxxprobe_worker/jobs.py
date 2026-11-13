@@ -70,6 +70,7 @@ class Job(BaseModel):
     """
 
     submission_path: str | None = None
+    submission_bundle_path: str | None = None
     """The source file to grade — local path or s3:// URI.
 
     Required for a ``problem`` job and refused on a ``project`` job, whose
@@ -148,7 +149,7 @@ class Job(BaseModel):
     executor refuses rather than silently judging the real tests.
     """
 
-    @field_validator("package_path", "submission_path", mode="before")
+    @field_validator("package_path", "submission_path", "submission_bundle_path", mode="before")
     @classmethod
     def _coerce_location(cls, v: Any) -> str | None:
         """Accept a Path or a string, always store a string.
@@ -179,8 +180,10 @@ class Job(BaseModel):
             for name in ("team_id", "revision", "revision_seq", "benchmark_input"):
                 if getattr(self, name) is not None:
                     raise ValueError(f"only a benchmark job carries {name}")
-            if not self.submission_path:
-                raise ValueError("a problem job needs submission_path")
+            if bool(self.submission_path) == bool(self.submission_bundle_path):
+                raise ValueError(
+                    "a problem job needs exactly one of submission_path or submission_bundle_path"
+                )
             return self
 
         bench_only = {
@@ -206,6 +209,10 @@ class Job(BaseModel):
 
         if self.submission_path is not None:
             raise ValueError("a project job takes its sources from parts, not submission_path")
+        if self.submission_bundle_path is not None:
+            raise ValueError(
+                "a project job takes its sources from parts, not submission_bundle_path"
+            )
         if not self.parts:
             raise ValueError("a project job needs at least one entry in parts")
         if not self.project_slug:

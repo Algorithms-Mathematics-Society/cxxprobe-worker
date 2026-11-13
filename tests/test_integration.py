@@ -8,8 +8,10 @@ suite uses a scripted stand-in, which proves the worker honours cxxprobe's
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import NoReturn
 
@@ -158,3 +160,59 @@ def test_packaged_zip_is_judged(
     assert result.status is JobStatus.SUCCEEDED, result.error
     assert result.report is not None
     assert result.report["slug"] == "sum-two"
+
+
+def test_multifile_bundle_is_judged(
+    real_problem: Path, tmp_path: Path, logger, real_engine_binary: str, pytestconfig: pytest.Config
+):
+    # The candidate's changed header must be used while a declared reference
+    # header remains available from the private staged package.
+    attachments = real_problem / "attachments"
+    attachments.mkdir(exist_ok=True)
+    (attachments / "sum.hpp").write_text("#error stale starter header\n")
+    (attachments / "offset.hpp").write_text("inline int offset(){return 0;}\n")
+    spec_path = real_problem / "problem.yaml"
+    spec = spec_path.read_text()
+    if "attachments:\n  dir: attachments\n" in spec:
+        spec = spec.replace(
+            "attachments:\n  dir: attachments\n",
+            "attachments:\n  dir: attachments\n  reference_files: [offset.hpp]\n",
+        )
+    else:
+        spec += "\nattachments:\n  dir: attachments\n  reference_files: [offset.hpp]\n"
+    spec_path.write_text(spec)
+    bundle = tmp_path / "submission.bundle.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "format": "ams-source-bundle-v1",
+                    "entrypoint": "main.cpp",
+                    "compilation_units": ["main.cpp", "sum.cpp"],
+                }
+            ),
+        )
+        archive.writestr(
+            "files/main.cpp",
+            '#include <iostream>\n#include "sum.hpp"\n'
+            'int main(){int a,b;std::cin>>a>>b;std::cout<<sum(a,b)<<"\\n";}\n',
+        )
+        archive.writestr("files/sum.hpp", "int sum(int a, int b);\n")
+        archive.writestr(
+            "files/sum.cpp",
+            '#include "sum.hpp"\n#include "offset.hpp"\n'
+            "int sum(int a,int b){return a+b+offset();}\n",
+        )
+
+    result = build_executor(tmp_path, logger, real_engine_binary).execute(
+        Job(job_id="it-bundle", package_path=str(real_problem), submission_bundle_path=str(bundle))
+    )
+    _skip_without_sandbox(result, pytestconfig)
+
+    assert result.status is JobStatus.SUCCEEDED, result.error
+    assert result.report is not None
+    assert result.report["slug"] == "sum-two"
+    assert result.report["overall"] == "PASS"
+    assert "submission.bundle.zip" in result.artifacts
+    assert (attachments / "sum.hpp").is_file()

@@ -50,7 +50,7 @@ jobs:
       contents: read
     env:
       # Independent CI compatibility pin; does not change the deployment release.
-      CXXPROBE_COMMIT: dd0c9901756519110b9996cbeebcde3eb427aa84
+      CXXPROBE_COMMIT: 08a0c95a20b2d194a772cc164500a970ab043d75
       CC: gcc-14
       CXX: g++-14
     steps:
