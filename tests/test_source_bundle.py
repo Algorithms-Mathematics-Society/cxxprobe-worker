@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from collections.abc import Sequence
 
 import pytest
 
@@ -16,7 +17,9 @@ from cxxprobe_worker.storage import FilesystemArtifactStorage
 from cxxprobe_worker.workspace import WorkspaceManager
 
 
-def archive(files, *, entry="main.cpp", units=None):
+def archive(
+    files: dict[str, str], *, entry: str = "main.cpp", units: Sequence[object] | None = None
+) -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
         zf.writestr(
@@ -111,9 +114,9 @@ def test_problem_bundle_reaches_judge_with_capability_flag(tmp_path, logger):
         'prev=""; for arg in "$@"; do\n'
         '  if [ "$prev" = "--output" ]; then\n'
         '    printf \'{"overall":"PASS"}\' > "$arg"\n'
-        '  fi\n'
+        "  fi\n"
         '  prev="$arg"\n'
-        'done\n'
+        "done\n"
         "exit 0\n"
     )
     engine.chmod(0o755)

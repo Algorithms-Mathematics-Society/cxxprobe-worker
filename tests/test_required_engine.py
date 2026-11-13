@@ -160,7 +160,7 @@ def test_required_mode_rejects_teardown_skip_after_all_calls_pass(gate_suite, ou
     result = _run_gate(gate_suite, _engine(gate_suite))
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
-    assert "3 passed" in output, output
+    assert "4 passed" in output, output
     assert "rejects skipped/xfail integration" in output
     assert "teardown sentinel" in output
 
@@ -177,14 +177,14 @@ def test_required_mode_rejects_empty_integration_module(gate_suite):
     result = _run_gate(gate_suite, _engine(gate_suite))
     assert result.returncode != 0, result.stdout + result.stderr
     assert (
-        "all three real-engine integration cases must be selected" in result.stdout + result.stderr
+        "all four real-engine integration cases must be selected" in result.stdout + result.stderr
     )
 
 
-def test_gate_accepts_all_three_executed_calls(gate_suite):
+def test_gate_accepts_all_four_executed_calls(gate_suite):
     result = _run_gate(gate_suite, _engine(gate_suite))
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "3 passed" in result.stdout
+    assert "4 passed" in result.stdout
 
 
 @pytest.mark.parametrize("fault", ["missing", "contest", "init", "pack", "sandbox"])

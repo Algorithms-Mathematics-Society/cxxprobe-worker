@@ -33,6 +33,7 @@ _REQUIRED_CASES = {
     "test_correct_solution_is_judged_and_stored",
     "test_wrong_solution_is_still_a_successful_job",
     "test_packaged_zip_is_judged",
+    "test_multifile_bundle_is_judged",
 }
 _PASSED_CASES = pytest.StashKey[set[str]]()
 _GATE_ERROR = pytest.StashKey[str]()
@@ -42,7 +43,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--require-real-engine",
         action="store_true",
-        help="Require a usable real engine and all three integration cases to pass without skips",
+        help="Require a usable real engine and all four integration cases to pass without skips",
     )
 
 
@@ -83,7 +84,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         missing = _REQUIRED_CASES - selected
         if missing:
             raise pytest.UsageError(
-                "--require-real-engine: all three real-engine integration cases must be selected; "
+                "--require-real-engine: all four real-engine integration cases must be selected; "
                 f"missing: {', '.join(sorted(missing))}"
             )
 
