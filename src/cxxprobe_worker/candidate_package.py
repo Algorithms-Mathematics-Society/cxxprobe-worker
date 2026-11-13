@@ -89,10 +89,10 @@ def sanitize_project(contest_dir: Path, project_slug: str, bundled_labels: set[s
         if not isinstance(part, dict):
             raise CandidatePackageError("project part declaration is invalid")
         label, directory = part.get("label"), part.get("dir")
-        if label not in bundled_labels:
-            continue
         if not isinstance(label, str) or not isinstance(directory, str):
             raise CandidatePackageError("project part label or directory is invalid")
+        if label not in bundled_labels:
+            continue
         found.add(label)
         sanitize_attachments(_contained(project_dir, directory))
     if found != bundled_labels:
